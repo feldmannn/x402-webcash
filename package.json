@@ -1,6 +1,6 @@
 {
   "name": "x402-webcash",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "x402 payment scheme for webcash bearer e-cash",
   "license": "MIT",
   "type": "module",
@@ -21,12 +21,14 @@
     "facilitator": "tsx src/server.ts",
     "example": "tsx examples/express-server.ts",
     "example:client": "tsx examples/fetch-client.ts",
+    "example:mcp": "tsx examples/mcp-server.ts",
     "test": "node --test --import tsx tests/basic.test.ts tests/middleware.test.ts tests/client.test.ts tests/split.test.ts tests/integration.test.ts tests/e2e.test.ts"
   },
   "dependencies": {
     "express": "^4.21.2"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/express": "^4.17.21",
     "@types/node": "^22.10.0",
     "tsx": "^4.19.2",

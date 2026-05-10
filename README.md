@@ -9,6 +9,7 @@ This repo contains:
 - **`src/client/`** — a transport-agnostic client (also exported as `x402-webcash/client`): `FileWallet`, `buildWebcashHeader`, and a `wrapFetchWithWebcash` fetch adapter that auto-settles 402s.
 - **`examples/express-server.ts`** — a tiny Express resource server that paywalls an endpoint using this facilitator.
 - **`examples/fetch-client.ts`** — a client that spends a webcash secret to call the paywalled endpoint above.
+- **`examples/mcp-server.ts`** — a stdio MCP server that exposes the paywalled endpoint as an MCP tool; Claude Desktop (or any MCP client) can call it and the server settles in webcash transparently.
 
 ## Why
 
@@ -86,27 +87,38 @@ failure-mode contract.
 
 ### Wiring into an MCP server
 
-Once you have a wrapped fetch, exposing it as an MCP tool is a few lines.
-Bring your own `@modelcontextprotocol/sdk`:
+`examples/mcp-server.ts` is a runnable stdio MCP server that exposes
+the paywalled `/premium` endpoint as a tool. The MCP SDK is a
+devDependency of this repo (consumers of `x402-webcash` who don't want
+MCP do not need to install it).
 
-```typescript
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { FileWallet, wrapFetchWithWebcash } from "x402-webcash/client";
+Three-terminal demo:
 
-const wallet = new FileWallet(process.env.WEBCASH_WALLET ?? "./wallet.json");
-const pay = wrapFetchWithWebcash(fetch, { wallet });
-
-const server = new McpServer({ name: "x402-webcash-demo", version: "0.1.0" });
-server.tool("get-premium-data", "Fetch the paywalled premium endpoint", {}, async () => {
-  const res = await pay(process.env.RESOURCE_URL ?? "http://localhost:4020/premium");
-  return { content: [{ type: "text", text: await res.text() }] };
-});
-await server.connect(new StdioServerTransport());
+```bash
+npm run facilitator     # :4021
+npm run example         # :4020 (paywalled /premium)
+npm run example:mcp     # stdio MCP server
 ```
 
-Point Claude Desktop (or any MCP client) at this server and the tool call
-will settle in webcash transparently.
+Then add the MCP server to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "x402-webcash-demo": {
+      "command": "npx",
+      "args": ["tsx", "/absolute/path/to/examples/mcp-server.ts"],
+      "env": { "WEBCASH_WALLET": "/absolute/path/to/client-wallet.json" }
+    }
+  }
+}
+```
+
+Calling the `get-premium-data` tool triggers a 402 from the resource
+server; the wrapped fetch takes a webcash secret from the wallet
+(auto-splitting a larger one if needed), retries with X-PAYMENT, and
+returns the 200 body to the agent. See `examples/mcp-server.ts` for the
+~30 lines of glue.
 
 ## License
 
