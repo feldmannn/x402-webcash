@@ -10,6 +10,7 @@ test("parseSecret accepts valid form", () => {
   assert.equal(p!.decimal, "0.3");
   assert.equal(p!.hex, "abcdef");
   assert.equal(p!.wats, 30_000_000n);
+  assert.equal(p!.raw, "e0.3:secret:abcdef");
 });
 
 test("parseSecret accepts whole-number amounts", () => {
@@ -22,6 +23,13 @@ test("parseSecret accepts up to 8 fractional digits", () => {
   const p = parseSecret("e0.00000001:secret:ab");
   assert.ok(p);
   assert.equal(p!.wats, 1n);
+});
+
+test("parseSecret normalizes decimal output (raw is preserved)", () => {
+  const p = parseSecret("e1.30:secret:abcdef");
+  assert.ok(p);
+  assert.equal(p!.decimal, "1.3");
+  assert.equal(p!.raw, "e1.30:secret:abcdef");
 });
 
 test("parseSecret rejects more than 8 fractional digits", () => {
@@ -107,6 +115,14 @@ test("verify rejects malformed secret", async () => {
   assert.equal(v.invalidReason, "invalid_webcash_secret_format");
 });
 
+test("verify rejects non-webcash network namespace", async () => {
+  const f = new Facilitator();
+  const req = buildReq({ network: "ach:us" });
+  const v = await f.verify(req);
+  assert.equal(v.isValid, false);
+  assert.equal(v.invalidReason, "invalid_network");
+});
+
 test("verify rejects non-allowlisted issuer override", async () => {
   const f = new Facilitator();
   const req = buildReq({ payTo: "https://evil.example" });
@@ -138,6 +154,33 @@ test("verify rejects mismatched paymentPayload.accepted.scheme", async () => {
   });
   const req = buildReq();
   req.paymentPayload.accepted.scheme = "exact";
+  const v = await f.verify(req);
+  assert.equal(v.isValid, false);
+  assert.equal(v.invalidReason, "invalid_payload");
+});
+
+test("verify rejects mismatched accepted.payTo", async () => {
+  const f = new Facilitator();
+  const req = buildReq();
+  req.paymentPayload.accepted.payTo = "https://different.example";
+  const v = await f.verify(req);
+  assert.equal(v.isValid, false);
+  assert.equal(v.invalidReason, "invalid_payload");
+});
+
+test("verify rejects mismatched accepted.amount", async () => {
+  const f = new Facilitator();
+  const req = buildReq();
+  req.paymentPayload.accepted.amount = "999";
+  const v = await f.verify(req);
+  assert.equal(v.isValid, false);
+  assert.equal(v.invalidReason, "invalid_payload");
+});
+
+test("verify rejects mismatched accepted.asset", async () => {
+  const f = new Facilitator();
+  const req = buildReq();
+  req.paymentPayload.accepted.asset = "usd";
   const v = await f.verify(req);
   assert.equal(v.isValid, false);
   assert.equal(v.invalidReason, "invalid_payload");
@@ -243,6 +286,42 @@ test("settle reports network errors as issuer_unreachable", async () => {
   const s = await f.settle(buildReq());
   assert.equal(s.success, false);
   assert.equal(s.errorReason, "issuer_unreachable");
+});
+
+test("settle catches mintOutputSecret throws as unexpected_settle_error (without spending input)", async () => {
+  let replaceCalls = 0;
+  const f = new Facilitator({
+    fetchImpl: fakeFetch({
+      "/api/v1/replace": () => {
+        replaceCalls += 1;
+        return new Response("{}", { status: 200 });
+      },
+    }),
+    mintOutputSecret: () => {
+      throw new Error("wallet locked");
+    },
+  });
+  const s = await f.settle(buildReq());
+  assert.equal(s.success, false);
+  assert.match(s.errorReason!, /^unexpected_settle_error:/);
+  // Critically: replace was never called, so the input secret is still spendable.
+  assert.equal(replaceCalls, 0);
+});
+
+test("settle sends configured legalese to /replace", async () => {
+  let bodyJson: unknown = null;
+  const f = new Facilitator({
+    legalese: { terms: true, customDisclosure: true },
+    fetchImpl: fakeFetch({
+      "/api/v1/replace": (init) => {
+        bodyJson = JSON.parse(String(init.body));
+        return new Response("{}", { status: 200 });
+      },
+    }),
+  });
+  await f.settle(buildReq());
+  const body = bodyJson as { legalese: Record<string, unknown> };
+  assert.deepEqual(body.legalese, { terms: true, customDisclosure: true });
 });
 
 test("supported lists webcash kinds", () => {

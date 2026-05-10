@@ -30,10 +30,24 @@ export type PaywallOptions = {
   fetchImpl?: typeof fetch;
   /**
    * Called after a successful settlement with the newly-minted output secret.
-   * If you do not persist this secret to a wallet, the funds are lost.
-   * Omit only for testing.
+   * If you do not persist this secret to a wallet, the funds are lost. If
+   * this throws, `onSettledRecovery` is invoked and the request fails 500
+   * (the funds have already moved at the issuer; do not return 402).
    */
   onSettled?: (output: WebcashOutput, req: Request) => void | Promise<void>;
+  /**
+   * Last-resort sink invoked when `onSettled` throws. Receives the same
+   * output secret plus the original error. Use this to write to a recovery
+   * channel that is independent of your primary persistence (different disk,
+   * different DB, off-host log, etc.). If THIS also throws, the secret is
+   * logged to stderr as the absolute last witness — operators must grep for
+   * "[x402-webcash][CRITICAL]" to recover.
+   */
+  onSettledRecovery?: (
+    output: WebcashOutput,
+    originalError: unknown,
+    req: Request,
+  ) => void | Promise<void>;
 };
 
 const HTTPS_OR_LOOPBACK = /^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$))/i;
@@ -97,16 +111,35 @@ export function paywall(opts: PaywallOptions): RequestHandler {
       paymentRequirements: requirements,
     };
 
-    let settled: SettlementResponse;
+    let facResponse: globalThis.Response;
     try {
-      const r = await fetchImpl(`${facilitatorUrl}/settle`, {
+      facResponse = await fetchImpl(`${facilitatorUrl}/settle`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(settleReq),
       });
-      settled = (await r.json()) as SettlementResponse;
     } catch (e) {
       respond402(res, `facilitator unreachable: ${(e as Error).message}`, resource, requirements);
+      return;
+    }
+
+    if (!facResponse.ok && facResponse.status !== 402) {
+      // Treat any non-2xx (other than 402) as a facilitator failure. We must
+      // assume the secret was NOT spent — the client can safely retry.
+      respond402(
+        res,
+        `facilitator returned HTTP ${facResponse.status}`,
+        resource,
+        requirements,
+      );
+      return;
+    }
+
+    let settled: SettlementResponse;
+    try {
+      settled = (await facResponse.json()) as SettlementResponse;
+    } catch {
+      respond402(res, "facilitator response was not JSON", resource, requirements);
       return;
     }
 
@@ -116,18 +149,20 @@ export function paywall(opts: PaywallOptions): RequestHandler {
     }
 
     const output = (settled.extensions as { webcashOutput?: WebcashOutput } | undefined)?.webcashOutput;
+
     if (output && opts.onSettled) {
       try {
         await opts.onSettled(output, req);
-      } catch (e) {
-        // The funds have already moved at the issuer. We must not silently
-        // succeed the request without persisting the secret — the caller's
-        // persistence layer just failed and they need to know.
-        respond402(
+      } catch (primaryErr) {
+        // The funds have already moved at the issuer. We MUST NOT silently
+        // succeed without recording the new secret somewhere durable.
+        // Order of attempts: caller's recovery sink → stderr (last resort).
+        await runRecovery(output, primaryErr, req, opts.onSettledRecovery);
+        respond500(
           res,
-          `output_persistence_failed: ${(e as Error).message}`,
-          resource,
-          requirements,
+          "output_persistence_failed",
+          `primary persistence threw; recovery hook fired. Search logs for "[x402-webcash][CRITICAL]" with this transaction id to retrieve the secret.`,
+          settled.transaction,
         );
         return;
       }
@@ -136,6 +171,32 @@ export function paywall(opts: PaywallOptions): RequestHandler {
     res.setHeader("X-PAYMENT-RESPONSE", Buffer.from(JSON.stringify(settled), "utf8").toString("base64"));
     next();
   };
+}
+
+async function runRecovery(
+  output: WebcashOutput,
+  originalError: unknown,
+  req: Request,
+  recovery: PaywallOptions["onSettledRecovery"],
+): Promise<void> {
+  // Always emit to stderr first — that's the durable witness even if the
+  // recovery callback also throws. Operators can grep for the marker.
+  // eslint-disable-next-line no-console
+  console.error(
+    `[x402-webcash][CRITICAL] persistence_failure secret=${output.secret} ` +
+      `amountWats=${output.amountWats} amountDecimal=${output.amountDecimal} ` +
+      `error=${(originalError as Error)?.message ?? String(originalError)}`,
+  );
+  if (!recovery) return;
+  try {
+    await recovery(output, originalError, req);
+  } catch (recoveryErr) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[x402-webcash][CRITICAL] recovery_callback_also_failed secret=${output.secret} ` +
+        `recoveryError=${(recoveryErr as Error)?.message ?? String(recoveryErr)}`,
+    );
+  }
 }
 
 function respond402(
@@ -151,4 +212,14 @@ function respond402(
     accepts: [requirements],
   };
   res.status(402).json(body);
+}
+
+function respond500(res: Response, error: string, detail: string, transaction: string): void {
+  // 500 — not 402 — because settlement DID happen at the issuer and a retry
+  // by the client cannot help (the input secret is already spent).
+  res.status(500).json({
+    error,
+    detail,
+    transaction,
+  });
 }

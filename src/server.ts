@@ -1,7 +1,7 @@
 // Standalone HTTP facilitator server. Implements the x402 v2 facilitator API
 // for the `webcash` scheme: POST /verify, POST /settle, GET /supported.
 
-import express from "express";
+import express, { type ErrorRequestHandler } from "express";
 import { Facilitator } from "./facilitator.js";
 import type { FacilitatorRequest } from "./types.js";
 
@@ -49,6 +49,31 @@ function validBody(body: unknown): body is FacilitatorRequest {
   const b = body as Record<string, unknown>;
   return b.x402Version === 2 && !!b.paymentPayload && !!b.paymentRequirements;
 }
+
+// Catch-all error handler so a thrown handler returns structured JSON
+// instead of Express's default HTML stack-trace page.
+const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
+  // eslint-disable-next-line no-console
+  console.error(`[x402-webcash] handler error on ${req.method} ${req.path}:`, err);
+  if (res.headersSent) return;
+  if (req.path === "/verify") {
+    res.status(500).json({ isValid: false, invalidReason: "unexpected_verify_error" });
+    return;
+  }
+  if (req.path === "/settle") {
+    const network = (req.body as { paymentRequirements?: { network?: string } } | undefined)
+      ?.paymentRequirements?.network ?? "";
+    res.status(500).json({
+      success: false,
+      errorReason: "unexpected_settle_error",
+      transaction: "",
+      network,
+    });
+    return;
+  }
+  res.status(500).json({ error: "internal_error" });
+};
+app.use(errorHandler);
 
 app.listen(PORT, () => {
   // eslint-disable-next-line no-console

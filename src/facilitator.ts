@@ -9,6 +9,7 @@ import {
   WebcashPayload,
 } from "./types.js";
 import {
+  DEFAULT_LEGALESE,
   KNOWN_NETWORKS,
   ParsedSecret,
   issuerHealth,
@@ -31,13 +32,18 @@ export type FacilitatorOptions = {
   mintOutputSecret?: (amountDecimal: string) => string;
   /** TTL for the issuer-health cache, in milliseconds. Default 5000. */
   healthCacheTtlMs?: number;
+  /**
+   * Legalese object sent with every /replace request. Defaults to the
+   * canonical webcash.org form `{ terms: true }`. Override only if you are
+   * settling against an issuer fork with different disclosures.
+   */
+  legalese?: Record<string, unknown>;
 };
 
 type Validated = {
   ok: true;
   parsed: ParsedSecret;
   issuerUrl: string;
-  payload: WebcashPayload;
 };
 
 type ValidationFailure = { ok: false; reason: string };
@@ -47,6 +53,7 @@ export class Facilitator {
   private readonly fetchImpl: typeof fetch;
   private readonly mintOutputSecret: (amountDecimal: string) => string;
   private readonly healthCacheTtlMs: number;
+  private readonly legalese: Record<string, unknown>;
   private readonly healthCache = new Map<string, { ok: boolean; expires: number }>();
 
   constructor(opts: FacilitatorOptions = {}) {
@@ -55,6 +62,7 @@ export class Facilitator {
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.mintOutputSecret = opts.mintOutputSecret ?? newOutputSecret;
     this.healthCacheTtlMs = opts.healthCacheTtlMs ?? 5000;
+    this.legalese = opts.legalese ?? { ...DEFAULT_LEGALESE };
   }
 
   supported(): SupportedResponse {
@@ -91,11 +99,26 @@ export class Facilitator {
       };
     }
 
+    // Mint the output secret BEFORE calling /replace so a throw here cannot
+    // leave the input spent without a recoverable output. The caller-supplied
+    // mintOutputSecret may throw (wallet I/O, exhaustion, etc.); surface that
+    // as unexpected_settle_error rather than letting it crash the handler.
+    let output: string;
+    try {
+      output = this.mintOutputSecret(watsToDecimal(v.parsed.wats));
+    } catch (e) {
+      return {
+        success: false,
+        errorReason: `unexpected_settle_error: mint_output_failed: ${(e as Error).message}`,
+        transaction: "",
+        network,
+      };
+    }
+
     // Skip the explicit health check — the /replace call below is itself the
     // round-trip that proves issuer reachability and yields the canonical
     // success/failure for this settlement.
-    const output = this.mintOutputSecret(watsToDecimal(v.parsed.wats));
-    const result = await replaceSecret(v.issuerUrl, v.parsed.raw, output, this.fetchImpl);
+    const result = await replaceSecret(v.issuerUrl, v.parsed.raw, output, this.fetchImpl, this.legalese);
     if (!result.ok) {
       return {
         success: false,
@@ -128,12 +151,19 @@ export class Facilitator {
 
     if (reqs.scheme !== "webcash") return { ok: false, reason: "unsupported_scheme" };
     if (reqs.asset !== "webcash") return { ok: false, reason: "invalid_payment_requirements" };
+    if (!reqs.network.startsWith("webcash:")) return { ok: false, reason: "invalid_network" };
 
     // The client-echoed `accepted` field MUST agree with the server's
-    // requirements on at least scheme and network — otherwise the payload
-    // wasn't built against this resource.
+    // requirements on every binding field.
     const accepted = req.paymentPayload.accepted;
-    if (!accepted || accepted.scheme !== reqs.scheme || accepted.network !== reqs.network) {
+    if (
+      !accepted ||
+      accepted.scheme !== reqs.scheme ||
+      accepted.network !== reqs.network ||
+      accepted.payTo !== reqs.payTo ||
+      accepted.amount !== reqs.amount ||
+      accepted.asset !== reqs.asset
+    ) {
       return { ok: false, reason: "invalid_payload" };
     }
 
@@ -159,7 +189,7 @@ export class Facilitator {
     const issuerUrl = this.resolveIssuerUrl(reqs);
     if (!issuerUrl) return { ok: false, reason: "invalid_network" };
 
-    return { ok: true, parsed, issuerUrl, payload };
+    return { ok: true, parsed, issuerUrl };
   }
 
   private resolveIssuerUrl(reqs: PaymentRequirements): string | null {

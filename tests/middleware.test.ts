@@ -5,16 +5,17 @@ import express from "express";
 import { paywall, type WebcashOutput } from "../src/middleware.js";
 import type { SettlementResponse } from "../src/types.js";
 
-type FakeSettleHandler = (body: unknown) => SettlementResponse;
+type FakeHandler = (body: unknown) => { status?: number; body: unknown };
 
-function startFakeFacilitator(handler: FakeSettleHandler): Promise<{ url: string; close: () => Promise<void>; calls: { settle: number } }> {
+function startFakeFacilitator(handler: FakeHandler): Promise<{ url: string; close: () => Promise<void>; calls: { settle: number } }> {
   return new Promise((resolveStart) => {
     const calls = { settle: 0 };
     const app = express();
     app.use(express.json());
     app.post("/settle", (req, res) => {
       calls.settle += 1;
-      res.json(handler(req.body));
+      const r = handler(req.body);
+      res.status(r.status ?? 200).json(r.body);
     });
     const server = app.listen(0, () => {
       const addr = server.address();
@@ -28,7 +29,12 @@ function startFakeFacilitator(handler: FakeSettleHandler): Promise<{ url: string
   });
 }
 
-function startResourceServer(facilitatorUrl: string, onSettled?: (o: WebcashOutput) => void): Promise<{ url: string; close: () => Promise<void> }> {
+type ServerOpts = {
+  onSettled?: (o: WebcashOutput) => void;
+  onSettledRecovery?: (o: WebcashOutput, e: unknown) => void;
+};
+
+function startResourceServer(facilitatorUrl: string, opts: ServerOpts = {}): Promise<{ url: string; close: () => Promise<void> }> {
   return new Promise((resolveStart) => {
     const app = express();
     app.get(
@@ -36,7 +42,8 @@ function startResourceServer(facilitatorUrl: string, onSettled?: (o: WebcashOutp
       paywall({
         amountWats: 30_000_000n,
         facilitatorUrl,
-        onSettled,
+        onSettled: opts.onSettled,
+        onSettledRecovery: opts.onSettledRecovery,
       }),
       (_req, res) => res.json({ ok: true }),
     );
@@ -74,6 +81,16 @@ function fetchJson(url: string, init: http.RequestOptions & { headers?: Record<s
   });
 }
 
+const successSettlement: SettlementResponse = {
+  success: true,
+  transaction: "abcfeed",
+  network: "webcash:mainnet",
+  amount: "30000000",
+  extensions: {
+    webcashOutput: { secret: "e0.3:secret:cafebabe", amountDecimal: "0.3", amountWats: "30000000" },
+  },
+};
+
 function encodePayload(secret: string): string {
   const payload = {
     x402Version: 2,
@@ -91,7 +108,7 @@ function encodePayload(secret: string): string {
 }
 
 test("middleware returns 402 with PaymentRequired body when no header", async () => {
-  const fac = await startFakeFacilitator(() => ({ success: true, transaction: "x", network: "webcash:mainnet" }));
+  const fac = await startFakeFacilitator(() => ({ body: successSettlement }));
   const server = await startResourceServer(fac.url);
   try {
     const r = await fetchJson(`${server.url}/premium`);
@@ -108,22 +125,8 @@ test("middleware returns 402 with PaymentRequired body when no header", async ()
 
 test("middleware allows request and invokes onSettled with the output secret", async () => {
   let received: WebcashOutput | null = null;
-  const fac = await startFakeFacilitator(() => ({
-    success: true,
-    transaction: "abc",
-    network: "webcash:mainnet",
-    amount: "30000000",
-    extensions: {
-      webcashOutput: {
-        secret: "e0.3:secret:cafebabe",
-        amountDecimal: "0.3",
-        amountWats: "30000000",
-      },
-    },
-  }));
-  const server = await startResourceServer(fac.url, (o) => {
-    received = o;
-  });
+  const fac = await startFakeFacilitator(() => ({ body: successSettlement }));
+  const server = await startResourceServer(fac.url, { onSettled: (o) => { received = o; } });
   try {
     const r = await fetchJson(`${server.url}/premium`, {
       headers: { "X-PAYMENT": encodePayload("e0.3:secret:abcdef") },
@@ -139,12 +142,14 @@ test("middleware allows request and invokes onSettled with the output secret", a
   }
 });
 
-test("middleware returns 402 when settlement fails", async () => {
+test("middleware returns 402 when settlement reports failure", async () => {
   const fac = await startFakeFacilitator(() => ({
-    success: false,
-    errorReason: "issuer_rejected",
-    transaction: "",
-    network: "webcash:mainnet",
+    body: {
+      success: false,
+      errorReason: "issuer_rejected",
+      transaction: "",
+      network: "webcash:mainnet",
+    },
   }));
   const server = await startResourceServer(fac.url);
   try {
@@ -158,26 +163,74 @@ test("middleware returns 402 when settlement fails", async () => {
   }
 });
 
-test("middleware returns 402 when onSettled throws (funds-moved error path)", async () => {
-  const fac = await startFakeFacilitator(() => ({
-    success: true,
-    transaction: "abc",
-    network: "webcash:mainnet",
-    extensions: {
-      webcashOutput: { secret: "e0.3:secret:cafebabe", amountDecimal: "0.3", amountWats: "30000000" },
-    },
-  }));
-  const server = await startResourceServer(fac.url, () => {
-    throw new Error("disk full");
-  });
+test("middleware returns 402 when facilitator returns 5xx (client may safely retry)", async () => {
+  const fac = await startFakeFacilitator(() => ({ status: 502, body: { gateway: "down" } }));
+  const server = await startResourceServer(fac.url);
   try {
     const r = await fetchJson(`${server.url}/premium`, {
       headers: { "X-PAYMENT": encodePayload("e0.3:secret:abcdef") },
     });
     assert.equal(r.status, 402);
     const body = r.body as { error: string };
-    assert.match(body.error, /output_persistence_failed/);
+    assert.match(body.error, /facilitator returned HTTP 502/);
   } finally {
+    await server.close();
+    await fac.close();
+  }
+});
+
+test("middleware returns 500 when onSettled throws (funds-already-moved path)", async () => {
+  let recoveryCalled = false;
+  const fac = await startFakeFacilitator(() => ({ body: successSettlement }));
+  const server = await startResourceServer(fac.url, {
+    onSettled: () => {
+      throw new Error("disk full");
+    },
+    onSettledRecovery: () => {
+      recoveryCalled = true;
+    },
+  });
+  try {
+    const r = await fetchJson(`${server.url}/premium`, {
+      headers: { "X-PAYMENT": encodePayload("e0.3:secret:abcdef") },
+    });
+    assert.equal(r.status, 500);
+    const body = r.body as { error: string; transaction: string };
+    assert.equal(body.error, "output_persistence_failed");
+    assert.equal(body.transaction, "abcfeed");
+    assert.equal(recoveryCalled, true);
+  } finally {
+    await server.close();
+    await fac.close();
+  }
+});
+
+test("middleware logs to stderr even when both onSettled and recovery throw", async () => {
+  const originalErr = console.error;
+  const captured: string[] = [];
+  // eslint-disable-next-line no-console
+  console.error = (...args: unknown[]) => {
+    captured.push(args.map(String).join(" "));
+  };
+  const fac = await startFakeFacilitator(() => ({ body: successSettlement }));
+  const server = await startResourceServer(fac.url, {
+    onSettled: () => {
+      throw new Error("primary failed");
+    },
+    onSettledRecovery: () => {
+      throw new Error("recovery also failed");
+    },
+  });
+  try {
+    const r = await fetchJson(`${server.url}/premium`, {
+      headers: { "X-PAYMENT": encodePayload("e0.3:secret:abcdef") },
+    });
+    assert.equal(r.status, 500);
+    assert.ok(captured.some((s) => s.includes("[x402-webcash][CRITICAL]") && s.includes("e0.3:secret:cafebabe")));
+    assert.ok(captured.some((s) => s.includes("recovery_callback_also_failed")));
+  } finally {
+    // eslint-disable-next-line no-console
+    console.error = originalErr;
     await server.close();
     await fac.close();
   }

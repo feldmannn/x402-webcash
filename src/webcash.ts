@@ -1,17 +1,31 @@
 // Webcash issuer client + secret parsing utilities.
 // Talks to the canonical issuer at https://webcash.org by default; alternative
 // issuers must be added to the facilitator allowlist before use.
+//
+// Endpoint paths and the `legalese` shape are taken from the canonical
+// webcash client (kanzure/webcash, webcash/webcashbase.py + walletclient.py):
+//   - /api/v1/health_check
+//   - /api/v1/replace  with body { webcashes, new_webcashes, legalese }
+//   - LEGALESE = { "terms": "I acknowledge and agree to the Terms of Service ..." }
+//     and replace requests send the acknowledged form { "terms": true }.
 
 import { createHash, randomBytes } from "node:crypto";
 
 // Strict: leading "e", up to 8 fractional digits (wat precision), no whitespace,
-// lowercase hex only. Whole and fractional parts both required to be present.
+// lowercase hex only.
 const SECRET_RE = /^e(\d+)(?:\.(\d{1,8}))?:secret:([0-9a-f]+)$/;
 
 export const KNOWN_NETWORKS: Record<string, string> = {
   "webcash:mainnet": "https://webcash.org",
   "webcash:testnet": "https://webcash.org", // no public testnet exists; placeholder
 };
+
+/**
+ * Default legalese object sent with every /replace call. Matches the canonical
+ * webcash client's acknowledged form. Forks of the issuer with different
+ * disclosures may need a different shape; pass `legalese` to the facilitator.
+ */
+export const DEFAULT_LEGALESE: Readonly<Record<string, unknown>> = Object.freeze({ terms: true });
 
 export type ParsedSecret = {
   decimal: string;
@@ -30,7 +44,9 @@ export function parseSecret(s: string): ParsedSecret | null {
   const padded = (frac + "00000000").slice(0, 8);
   const wats = BigInt(whole) * 100_000_000n + BigInt(padded || "0");
   if (wats === 0n) return null;
-  const decimal = frac ? `${whole}.${frac}` : whole;
+  // Normalize to canonical form so callers don't see two strings for the same
+  // amount (e.g. "1.30" vs "1.3"). The original input is preserved in `raw`.
+  const decimal = watsToDecimal(wats);
   return { decimal, wats, hex, raw: s };
 }
 
@@ -75,6 +91,7 @@ export async function replaceSecret(
   input: string,
   output: string,
   fetchImpl: typeof fetch = fetch,
+  legalese: Record<string, unknown> = DEFAULT_LEGALESE,
 ): Promise<ReplaceResult> {
   let res: Response;
   try {
@@ -84,7 +101,7 @@ export async function replaceSecret(
       body: JSON.stringify({
         webcashes: [input],
         new_webcashes: [output],
-        legalese: { terms: true },
+        legalese,
       }),
     });
   } catch (e) {

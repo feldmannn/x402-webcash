@@ -22,6 +22,8 @@ The x402 v2 specification encourages CAIP-2 format for non-blockchain networks (
 - `webcash:mainnet` — the canonical webcash issuer at `https://webcash.org`
 - `webcash:testnet` — reserved for testing/sandbox issuers
 
+`network` MUST start with the literal `webcash:` namespace. Facilitators MUST reject `paymentRequirements` whose `network` is outside this namespace, even if `extra.issuerUrl` is set to an allowlisted URL.
+
 Custom issuers (forks or self-hosted) MAY override the default issuer URL via `extra.issuerUrl`. Facilitators MUST allowlist any non-canonical issuer.
 
 ## `paymentRequirements` Field Mappings
@@ -99,7 +101,7 @@ The amount embedded in `secret` (here, `0.3`) MUST match `accepted.amount` after
 The facilitator MUST perform the following verification steps in order. Verification MUST NOT replace the secret; replacement happens only at settlement.
 
 1. **Format validation.** Parse `payload.secret` against the regex `^e(\d+)(?:\.(\d{1,8}))?:secret:[0-9a-f]+$`. The fractional part is at most 8 digits (wat precision); whitespace and uppercase hex MUST be rejected. Zero-amount secrets MUST be rejected. On failure return `invalidReason: "invalid_webcash_secret_format"`.
-2. **Cross-check `paymentPayload.accepted`.** Its `scheme` and `network` MUST equal those of `paymentRequirements`. On mismatch return `invalidReason: "invalid_payload"`.
+2. **Cross-check `paymentPayload.accepted`.** Its `scheme`, `network`, `payTo`, `amount`, and `asset` MUST all equal those of `paymentRequirements`. On any mismatch return `invalidReason: "invalid_payload"`.
 3. **Amount match.** Convert the decimal amount embedded in the secret to wats and compare against `paymentRequirements.amount`. They MUST be exactly equal. Reject mismatches with `invalidReason: "invalid_webcash_amount_mismatch"`.
 4. **Issuer match.** The resolved issuer URL (either `extra.issuerUrl` if set, otherwise the canonical URL for `network`) MUST equal `payTo` AND MUST be on the facilitator's allowlist. On mismatch return `invalidReason: "invalid_network"`.
 5. **Issuer reachability.** The facilitator SHOULD verify the issuer is responsive (e.g., a `POST /api/v1/health_check` round-trip, ideally cached with a short TTL) before declaring `isValid: true`. A failed health check returns `invalidReason: "issuer_unreachable"`.
@@ -128,7 +130,19 @@ For `webcash.org`, the endpoint is `POST /api/v1/replace` with body:
 }
 ```
 
+The `legalese` field MUST contain the issuer's required disclosure acknowledgements. For `webcash.org` this is `{ "terms": true }` (per the canonical webcash client's `LEGALESE` constant in `webcashbase.py`). Forks of the issuer with different disclosures will reject the request with an `invalid_legalese`-style error; facilitators MUST allow this object to be configured.
+
+The output secret MUST be minted before the `/replace` call so a failure to mint cannot leave the input spent without a recoverable output.
+
 On success, the input secret is unspendable thereafter (issuer-enforced), and the output secret(s) are valid bearer tokens held by the resource server. Failure returns a 4xx response from the issuer.
+
+### Persistence atomicity (resource-server side)
+
+A successful `/replace` response is the point of no return — the input secret is permanently spent. The resource server MUST persist the output secret to a durable store before considering the transaction settled. If persistence fails, the server MUST:
+
+1. Write the output secret to a recovery sink that is independent of the primary persistence (different disk, different DB, off-host log, etc.).
+2. As an absolute last resort, log the secret to stderr with a recognizable marker (`[x402-webcash][CRITICAL]` is suggested) so an operator can grep logs to recover.
+3. Return HTTP 500 — **not** 402 — to the client. 402 invites a retry, but the input secret is already spent and no retry can succeed; 500 signals a server-side failure that requires operator action.
 
 ### `SettlementResponse`
 
