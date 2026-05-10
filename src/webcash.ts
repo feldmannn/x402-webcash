@@ -93,22 +93,36 @@ export type ReplaceResult =
   | { ok: true; outputs: string[] }
   | { ok: false; status?: number; reason: string };
 
+/**
+ * Atomic replacement at the issuer.
+ *
+ * `input` and `output` may each be either a single secret or an array.
+ * The issuer enforces that the total wat amount of inputs equals the total
+ * wat amount of outputs; mismatches are rejected.
+ *
+ * Common shapes:
+ * - 1 input -> 1 output: a "refresh" (same amount, new bearer hex).
+ * - 1 input -> 2 outputs: a "split" — pay one party, keep change.
+ * - N inputs -> 1 output: a "merge" — consolidate denominations.
+ */
 export async function replaceSecret(
   issuerUrl: string,
-  input: string,
-  output: string,
+  input: string | string[],
+  output: string | string[],
   fetchImpl: typeof fetch = fetch,
   legalese: Record<string, unknown> = DEFAULT_LEGALESE,
   timeoutMs: number = DEFAULT_ISSUER_TIMEOUT_MS,
 ): Promise<ReplaceResult> {
+  const inputs = Array.isArray(input) ? input : [input];
+  const outputs = Array.isArray(output) ? output : [output];
   let res: Response;
   try {
     res = await fetchImpl(`${issuerUrl.replace(/\/$/, "")}/api/v1/replace`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        webcashes: [input],
-        new_webcashes: [output],
+        webcashes: inputs,
+        new_webcashes: outputs,
         legalese,
       }),
       signal: AbortSignal.timeout(timeoutMs),
@@ -132,7 +146,7 @@ export async function replaceSecret(
   if (errInBody) {
     return { ok: false, status: res.status, reason: errInBody };
   }
-  return { ok: true, outputs: [output] };
+  return { ok: true, outputs };
 }
 
 function extractErrorString(body: unknown): string | null {

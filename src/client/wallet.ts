@@ -23,6 +23,13 @@ export interface Wallet {
    * return it to the wallet.
    */
   takeExact(wats: string): Promise<string | null>;
+  /**
+   * Atomically remove a specific secret. Returns true if it was present
+   * and removed, false if it was not in the wallet. Used by split logic:
+   * the caller picks a specific larger secret to consume, then takes it
+   * out by value before calling `/replace` at the issuer.
+   */
+  take(secret: string): Promise<boolean>;
   /** Persist a secret to the wallet. */
   put(secret: string): Promise<void>;
   /** Return the list of held secrets (for diagnostics/testing). */
@@ -80,6 +87,15 @@ export class FileWallet implements Wallet {
     return picked!;
   }
 
+  async take(secret: string): Promise<boolean> {
+    const secrets = await this.read();
+    const idx = secrets.indexOf(secret);
+    if (idx < 0) return false;
+    secrets.splice(idx, 1);
+    await this.write(secrets);
+    return true;
+  }
+
   async put(secret: string): Promise<void> {
     if (parseSecret(secret) === null) {
       throw new Error("refusing to put malformed secret into wallet");
@@ -118,6 +134,13 @@ export class MemoryWallet implements Wallet {
     });
     if (idx < 0) return null;
     return this.secrets.splice(idx, 1)[0]!;
+  }
+
+  async take(secret: string): Promise<boolean> {
+    const idx = this.secrets.indexOf(secret);
+    if (idx < 0) return false;
+    this.secrets.splice(idx, 1);
+    return true;
   }
 
   async put(secret: string): Promise<void> {

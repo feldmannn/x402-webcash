@@ -17,11 +17,22 @@ export type { PaywallOptions, WebcashOutput } from "./middleware.js";
 // Client-side scheme handler (also exported via the `x402-webcash/client`
 // subpath for consumers that want to import only the client surface).
 export {
+  AmbiguousSplitError,
   buildWebcashHeader,
   FileWallet,
+  IssuerRejectedSplitError,
   MemoryWallet,
   NoMatchingSecretError,
+  NoSplittableSecretError,
+  splitToMatch,
   WEBCASH_SCHEME,
   wrapFetchWithWebcash,
 } from "./client/index.js";
-export type { BuiltHeader, Wallet, WrapFetchOptions } from "./client/index.js";
+export type {
+  AutoSplitOptions,
+  BuildHeaderOptions,
+  BuiltHeader,
+  SplitOptions,
+  Wallet,
+  WrapFetchOptions,
+} from "./client/index.js";

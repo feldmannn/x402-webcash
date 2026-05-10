@@ -7,7 +7,14 @@
 // like.
 
 export { buildWebcashHeader, NoMatchingSecretError, WEBCASH_SCHEME } from "./scheme.js";
-export type { BuiltHeader } from "./scheme.js";
+export type { AutoSplitOptions, BuildHeaderOptions, BuiltHeader } from "./scheme.js";
+export {
+  AmbiguousSplitError,
+  IssuerRejectedSplitError,
+  NoSplittableSecretError,
+  splitToMatch,
+} from "./split.js";
+export type { SplitOptions } from "./split.js";
 export { wrapFetchWithWebcash } from "./fetch.js";
 export type { WrapFetchOptions } from "./fetch.js";
 export { FileWallet, MemoryWallet } from "./wallet.js";

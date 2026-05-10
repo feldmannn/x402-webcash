@@ -15,7 +15,7 @@
 // operator can recover it.
 
 import type { PaymentRequired } from "../types.js";
-import { buildWebcashHeader, NoMatchingSecretError } from "./scheme.js";
+import { buildWebcashHeader, NoMatchingSecretError, type AutoSplitOptions } from "./scheme.js";
 import type { Wallet } from "./wallet.js";
 
 export type WrapFetchOptions = {
@@ -27,6 +27,13 @@ export type WrapFetchOptions = {
    * If omitted, the secret is only logged to stderr.
    */
   onAmbiguous?: (info: { secret: string; status: number; body: unknown }) => void | Promise<void>;
+  /**
+   * If set, the wrapper will split a larger secret at the issuer when the
+   * wallet has no exact-amount match. See `AutoSplitOptions` for the
+   * (optional) override fields — by default the issuer URL is taken from
+   * the 402 challenge itself.
+   */
+  autoSplit?: AutoSplitOptions;
 };
 
 type FetchLike = typeof fetch;
@@ -42,7 +49,7 @@ type RetriedInit = RequestInit & { [k: symbol]: boolean };
  * (the caller can chain another wrapper for those).
  */
 export function wrapFetchWithWebcash(fetchImpl: FetchLike, opts: WrapFetchOptions): FetchLike {
-  const { wallet, onAmbiguous } = opts;
+  const { wallet, onAmbiguous, autoSplit } = opts;
 
   const wrapped: FetchLike = async (input, init) => {
     const initObj = (init ?? {}) as RetriedInit;
@@ -65,7 +72,7 @@ export function wrapFetchWithWebcash(fetchImpl: FetchLike, opts: WrapFetchOption
 
     let built: Awaited<ReturnType<typeof buildWebcashHeader>>;
     try {
-      built = await buildWebcashHeader(body, wallet);
+      built = await buildWebcashHeader(body, wallet, { autoSplit });
     } catch (err) {
       if (err instanceof NoMatchingSecretError) {
         // Surface as a thrown error rather than the original 402 so callers

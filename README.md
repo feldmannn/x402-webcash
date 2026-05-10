@@ -65,6 +65,25 @@ For non-fetch transports (axios, undici Dispatcher, MCP transports), call
 string for the X-PAYMENT field plus the secret you took, so you can wire the
 retry into whatever client you already have.
 
+### Auto-split
+
+By default, the wallet must hold an unspent secret of *exactly* the amount
+the resource server demands. Pass `autoSplit` to derive an exact-amount
+secret on demand by asking the issuer to atomically replace a larger one
+with `[required, change]`:
+
+```typescript
+const pay = wrapFetchWithWebcash(fetch, { wallet, autoSplit: {} });
+```
+
+The issuer URL is read from the 402 challenge itself (`extra.issuerUrl` or
+`payTo`). On clean rejection the input secret is returned to the wallet;
+on a network failure the outcome is ambiguous, the input is NOT returned
+(it may have been spent at the issuer), and both newly-minted output
+secrets are logged to stderr with the `[x402-webcash][CRITICAL]` marker
+so an operator can recover them. See `splitToMatch` for the full
+failure-mode contract.
+
 ### Wiring into an MCP server
 
 Once you have a wrapped fetch, exposing it as an MCP tool is a few lines.
