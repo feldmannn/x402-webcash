@@ -5,8 +5,10 @@ An [x402](https://github.com/coinbase/x402) payment scheme for [webcash](https:/
 This repo contains:
 
 - **[`specs/scheme_webcash.md`](specs/scheme_webcash.md)** — the formal scheme specification, written against the x402 v2 scheme template. Intended to be proposed upstream to `coinbase/x402`.
-- **`src/`** — a TypeScript reference facilitator implementing `POST /verify`, `POST /settle`, and `GET /supported` for the `webcash` scheme.
+- **`src/`** — a TypeScript reference facilitator implementing `POST /verify`, `POST /settle`, and `GET /supported` for the `webcash` scheme, plus an Express middleware and a client-side scheme handler.
+- **`src/client/`** — a transport-agnostic client (also exported as `x402-webcash/client`): `FileWallet`, `buildWebcashHeader`, and a `wrapFetchWithWebcash` fetch adapter that auto-settles 402s.
 - **`examples/express-server.ts`** — a tiny Express resource server that paywalls an endpoint using this facilitator.
+- **`examples/fetch-client.ts`** — a client that spends a webcash secret to call the paywalled endpoint above.
 
 ## Why
 
@@ -36,6 +38,56 @@ curl -i http://localhost:4020/premium
 # Retry with a webcash secret in X-PAYMENT (base64-encoded PaymentPayload)
 curl -i -H "X-PAYMENT: $PAYLOAD_B64" http://localhost:4020/premium
 ```
+
+Or via the TypeScript client (handles the 402 + retry automatically):
+
+```bash
+echo '{"secrets":["e0.3:secret:<your-hex>"]}' > ./client-wallet.json
+npm run example:client
+```
+
+## Using the client in your own code
+
+```typescript
+import { FileWallet, wrapFetchWithWebcash } from "x402-webcash/client";
+
+const wallet = new FileWallet("./wallet.json");
+const pay = wrapFetchWithWebcash(fetch, { wallet });
+
+const res = await pay("https://api.example.com/premium");
+// On 402 advertising webcash, `pay` takes a matching secret from the wallet,
+// retries with X-PAYMENT, and returns the 200. Schemes other than webcash
+// pass through unchanged so you can chain other handlers.
+```
+
+For non-fetch transports (axios, undici Dispatcher, MCP transports), call
+`buildWebcashHeader(body, wallet)` directly — it returns the base64 header
+string for the X-PAYMENT field plus the secret you took, so you can wire the
+retry into whatever client you already have.
+
+### Wiring into an MCP server
+
+Once you have a wrapped fetch, exposing it as an MCP tool is a few lines.
+Bring your own `@modelcontextprotocol/sdk`:
+
+```typescript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { FileWallet, wrapFetchWithWebcash } from "x402-webcash/client";
+
+const wallet = new FileWallet(process.env.WEBCASH_WALLET ?? "./wallet.json");
+const pay = wrapFetchWithWebcash(fetch, { wallet });
+
+const server = new McpServer({ name: "x402-webcash-demo", version: "0.1.0" });
+server.tool("get-premium-data", "Fetch the paywalled premium endpoint", {}, async () => {
+  const res = await pay(process.env.RESOURCE_URL ?? "http://localhost:4020/premium");
+  return { content: [{ type: "text", text: await res.text() }] };
+});
+await server.connect(new StdioServerTransport());
+```
+
+Point Claude Desktop (or any MCP client) at this server and the tool call
+will settle in webcash transparently.
 
 ## License
 
