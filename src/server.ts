@@ -1,7 +1,7 @@
 // Standalone HTTP facilitator server. Implements the x402 v2 facilitator API
 // for the `webcash` scheme: POST /verify, POST /settle, GET /supported.
 
-import express, { type ErrorRequestHandler } from "express";
+import express, { type ErrorRequestHandler, type NextFunction, type Request, type Response } from "express";
 import { Facilitator } from "./facilitator.js";
 import type { FacilitatorRequest } from "./types.js";
 
@@ -10,10 +10,26 @@ const issuerAllowlist = (process.env.WEBCASH_ISSUER_ALLOWLIST ?? "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+const corsOrigin = process.env.CORS_ORIGIN ?? "*";
 
 const facilitator = new Facilitator({ issuerAllowlist });
 const app = express();
 app.use(express.json({ limit: "64kb" }));
+
+// Permissive CORS so browser-based x402 clients can reach the facilitator.
+// Override the origin via CORS_ORIGIN env var; set to a specific origin in
+// production rather than "*".
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.setHeader("Access-Control-Allow-Origin", corsOrigin);
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "content-type, x-payment");
+  res.setHeader("Access-Control-Expose-Headers", "x-payment-response");
+  if (req.method === "OPTIONS") {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 
 app.get("/supported", (_req, res) => {
   res.json(facilitator.supported());

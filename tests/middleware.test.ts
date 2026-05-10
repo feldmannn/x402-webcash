@@ -205,6 +205,78 @@ test("middleware returns 500 when onSettled throws (funds-already-moved path)", 
   }
 });
 
+test("middleware returns 500 when facilitator omits webcashOutput on success (integrity check)", async () => {
+  const errs: string[] = [];
+  const originalErr = console.error;
+  // eslint-disable-next-line no-console
+  console.error = (...args: unknown[]) => {
+    errs.push(args.map(String).join(" "));
+  };
+  // Settlement reports success but never surfaces the new bearer secret.
+  const fac = await startFakeFacilitator(() => ({
+    body: {
+      success: true,
+      transaction: "deadbeef",
+      network: "webcash:mainnet",
+      amount: "30000000",
+      // extensions deliberately omitted
+    },
+  }));
+  let onSettledCalled = false;
+  const server = await startResourceServer(fac.url, {
+    onSettled: () => {
+      onSettledCalled = true;
+    },
+  });
+  try {
+    const r = await fetchJson(`${server.url}/premium`, {
+      headers: { "X-PAYMENT": encodePayload("e0.3:secret:abcdef") },
+    });
+    assert.equal(r.status, 500);
+    const body = r.body as { error: string; transaction: string };
+    assert.equal(body.error, "settlement_integrity_failure");
+    assert.equal(body.transaction, "deadbeef");
+    assert.equal(onSettledCalled, false, "onSettled must NOT be called when output is missing");
+    assert.ok(errs.some((s) => s.includes("[x402-webcash][CRITICAL]") && s.includes("missing_or_malformed_output_secret")));
+  } finally {
+    // eslint-disable-next-line no-console
+    console.error = originalErr;
+    await server.close();
+    await fac.close();
+  }
+});
+
+test("middleware returns 500 when webcashOutput is malformed (missing fields)", async () => {
+  const originalErr = console.error;
+  // eslint-disable-next-line no-console
+  console.error = () => {}; // suppress critical log noise
+  const fac = await startFakeFacilitator(() => ({
+    body: {
+      success: true,
+      transaction: "deadbeef",
+      network: "webcash:mainnet",
+      amount: "30000000",
+      extensions: {
+        webcashOutput: { secret: "" }, // missing amountDecimal/amountWats, empty secret
+      },
+    },
+  }));
+  const server = await startResourceServer(fac.url, { onSettled: () => {} });
+  try {
+    const r = await fetchJson(`${server.url}/premium`, {
+      headers: { "X-PAYMENT": encodePayload("e0.3:secret:abcdef") },
+    });
+    assert.equal(r.status, 500);
+    const body = r.body as { error: string };
+    assert.equal(body.error, "settlement_integrity_failure");
+  } finally {
+    // eslint-disable-next-line no-console
+    console.error = originalErr;
+    await server.close();
+    await fac.close();
+  }
+});
+
 test("middleware logs to stderr even when both onSettled and recovery throw", async () => {
   const originalErr = console.error;
   const captured: string[] = [];

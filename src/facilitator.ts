@@ -9,6 +9,7 @@ import {
   WebcashPayload,
 } from "./types.js";
 import {
+  DEFAULT_ISSUER_TIMEOUT_MS,
   DEFAULT_LEGALESE,
   KNOWN_NETWORKS,
   ParsedSecret,
@@ -38,6 +39,8 @@ export type FacilitatorOptions = {
    * settling against an issuer fork with different disclosures.
    */
   legalese?: Record<string, unknown>;
+  /** Per-request timeout for issuer calls, in milliseconds. Default 30000. */
+  issuerTimeoutMs?: number;
 };
 
 type Validated = {
@@ -54,6 +57,7 @@ export class Facilitator {
   private readonly mintOutputSecret: (amountDecimal: string) => string;
   private readonly healthCacheTtlMs: number;
   private readonly legalese: Record<string, unknown>;
+  private readonly issuerTimeoutMs: number;
   private readonly healthCache = new Map<string, { ok: boolean; expires: number }>();
 
   constructor(opts: FacilitatorOptions = {}) {
@@ -63,6 +67,7 @@ export class Facilitator {
     this.mintOutputSecret = opts.mintOutputSecret ?? newOutputSecret;
     this.healthCacheTtlMs = opts.healthCacheTtlMs ?? 5000;
     this.legalese = opts.legalese ?? { ...DEFAULT_LEGALESE };
+    this.issuerTimeoutMs = opts.issuerTimeoutMs ?? DEFAULT_ISSUER_TIMEOUT_MS;
   }
 
   supported(): SupportedResponse {
@@ -118,7 +123,14 @@ export class Facilitator {
     // Skip the explicit health check — the /replace call below is itself the
     // round-trip that proves issuer reachability and yields the canonical
     // success/failure for this settlement.
-    const result = await replaceSecret(v.issuerUrl, v.parsed.raw, output, this.fetchImpl, this.legalese);
+    const result = await replaceSecret(
+      v.issuerUrl,
+      v.parsed.raw,
+      output,
+      this.fetchImpl,
+      this.legalese,
+      this.issuerTimeoutMs,
+    );
     if (!result.ok) {
       return {
         success: false,
@@ -206,7 +218,7 @@ export class Facilitator {
     const cached = this.healthCache.get(url);
     const now = Date.now();
     if (cached && cached.expires > now) return cached.ok;
-    const result = await issuerHealth(url, this.fetchImpl);
+    const result = await issuerHealth(url, this.fetchImpl, this.issuerTimeoutMs);
     this.healthCache.set(url, { ok: result.ok, expires: now + this.healthCacheTtlMs });
     return result.ok;
   }
@@ -214,7 +226,10 @@ export class Facilitator {
 
 function mapIssuerReason(reason: string): string {
   const r = reason.toLowerCase();
+  if (r.includes("timeout")) return "issuer_unreachable";
   if (r.includes("network_error")) return "issuer_unreachable";
-  if (r.includes("insufficient")) return "insufficient_funds";
+  if (r.includes("insufficient") || r.includes("balance")) return "insufficient_funds";
+  if (r.includes("invalid_payload") || r.includes("malformed")) return "invalid_payload";
+  if (r.includes("legalese")) return "invalid_payment_requirements";
   return "issuer_rejected";
 }

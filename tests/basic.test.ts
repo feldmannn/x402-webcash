@@ -277,6 +277,30 @@ test("settle surfaces issuer rejection as issuer_rejected", async () => {
   assert.equal(s.transaction, "");
 });
 
+test("settle treats 200 with error body as failure (defensive)", async () => {
+  const f = new Facilitator({
+    fetchImpl: fakeFetch({
+      "/api/v1/replace": () =>
+        new Response(JSON.stringify({ error: "amount mismatch" }), { status: 200 }),
+    }),
+  });
+  const s = await f.settle(buildReq());
+  assert.equal(s.success, false);
+  assert.equal(s.errorReason, "issuer_rejected");
+});
+
+test("settle treats 200 with success:false body as failure", async () => {
+  const f = new Facilitator({
+    fetchImpl: fakeFetch({
+      "/api/v1/replace": () =>
+        new Response(JSON.stringify({ success: false, message: "insufficient balance" }), { status: 200 }),
+    }),
+  });
+  const s = await f.settle(buildReq());
+  assert.equal(s.success, false);
+  assert.equal(s.errorReason, "insufficient_funds");
+});
+
 test("settle reports network errors as issuer_unreachable", async () => {
   const f = new Facilitator({
     fetchImpl: (async () => {

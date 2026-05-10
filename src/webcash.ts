@@ -27,6 +27,8 @@ export const KNOWN_NETWORKS: Record<string, string> = {
  */
 export const DEFAULT_LEGALESE: Readonly<Record<string, unknown>> = Object.freeze({ terms: true });
 
+export const DEFAULT_ISSUER_TIMEOUT_MS = 30_000;
+
 export type ParsedSecret = {
   decimal: string;
   wats: bigint;
@@ -42,7 +44,7 @@ export function parseSecret(s: string): ParsedSecret | null {
   const frac = m[2] ?? "";
   const hex = m[3];
   const padded = (frac + "00000000").slice(0, 8);
-  const wats = BigInt(whole) * 100_000_000n + BigInt(padded || "0");
+  const wats = BigInt(whole) * 100_000_000n + BigInt(padded);
   if (wats === 0n) return null;
   // Normalize to canonical form so callers don't see two strings for the same
   // amount (e.g. "1.30" vs "1.3"). The original input is preserved in `raw`.
@@ -69,12 +71,17 @@ export function newOutputSecret(amountDecimal: string): string {
 
 export type IssuerHealth = { ok: boolean; status?: number; body?: unknown };
 
-export async function issuerHealth(issuerUrl: string, fetchImpl: typeof fetch = fetch): Promise<IssuerHealth> {
+export async function issuerHealth(
+  issuerUrl: string,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs: number = DEFAULT_ISSUER_TIMEOUT_MS,
+): Promise<IssuerHealth> {
   try {
     const res = await fetchImpl(`${issuerUrl.replace(/\/$/, "")}/api/v1/health_check`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
+      signal: AbortSignal.timeout(timeoutMs),
     });
     return { ok: res.ok, status: res.status, body: await safeJson(res) };
   } catch {
@@ -92,6 +99,7 @@ export async function replaceSecret(
   output: string,
   fetchImpl: typeof fetch = fetch,
   legalese: Record<string, unknown> = DEFAULT_LEGALESE,
+  timeoutMs: number = DEFAULT_ISSUER_TIMEOUT_MS,
 ): Promise<ReplaceResult> {
   let res: Response;
   try {
@@ -103,18 +111,41 @@ export async function replaceSecret(
         new_webcashes: [output],
         legalese,
       }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (e) {
-    return { ok: false, reason: `network_error: ${(e as Error).message}` };
+    const msg = (e as Error).message ?? String(e);
+    const reason = (e as Error).name === "TimeoutError" || msg.toLowerCase().includes("timeout")
+      ? `timeout: ${msg}`
+      : `network_error: ${msg}`;
+    return { ok: false, reason };
   }
+  const body = await safeJson(res);
   if (!res.ok) {
-    const body = await safeJson(res);
-    const reason = (body && typeof body === "object" && "error" in body && typeof (body as { error: unknown }).error === "string")
-      ? (body as { error: string }).error
-      : `issuer_status_${res.status}`;
+    const reason = extractErrorString(body) ?? `issuer_status_${res.status}`;
     return { ok: false, status: res.status, reason };
   }
+  // Defensive: even on 2xx, treat a body with a top-level `error` field as
+  // failure. Some servers respond 200 with an error envelope; we MUST NOT
+  // consider the secret unspent if the issuer is signaling otherwise.
+  const errInBody = extractErrorString(body);
+  if (errInBody) {
+    return { ok: false, status: res.status, reason: errInBody };
+  }
   return { ok: true, outputs: [output] };
+}
+
+function extractErrorString(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const b = body as Record<string, unknown>;
+  if (typeof b.error === "string" && b.error.length > 0) return b.error;
+  if (Array.isArray(b.errors) && b.errors.length > 0 && typeof b.errors[0] === "string") {
+    return b.errors[0] as string;
+  }
+  if (b.success === false) {
+    return typeof b.message === "string" ? b.message : "issuer_signalled_failure";
+  }
+  return null;
 }
 
 async function safeJson(res: Response): Promise<unknown> {

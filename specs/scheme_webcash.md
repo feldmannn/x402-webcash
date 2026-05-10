@@ -184,7 +184,9 @@ On a successful settlement the facilitator MUST return the bearer secret that no
 }
 ```
 
-**Resource servers MUST persist `extensions.webcashOutput.secret` to a wallet before considering the transaction complete.** A successful 200 response without persistence is an irrecoverable loss of funds. Implementations should fail the request (return 402) if persistence raises.
+**Resource servers MUST persist `extensions.webcashOutput.secret` to a wallet before considering the transaction complete.** A successful 200 response without persistence is an irrecoverable loss of funds.
+
+**A `success: true` response without `extensions.webcashOutput` (or with a malformed one) is a settlement-integrity failure.** The facilitator either lost or stole the new bearer secret. Resource servers MUST treat this as a fatal server-side error: do NOT serve the resource, return HTTP 500 (NOT 402), and log the transaction id to a recovery channel. Returning 402 invites a client retry that cannot succeed because the input secret is already spent at the issuer.
 
 ## Security Considerations
 

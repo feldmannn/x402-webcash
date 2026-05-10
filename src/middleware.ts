@@ -25,6 +25,7 @@ export type PaywallOptions = {
   facilitatorUrl?: string;
   description?: string;
   mimeType?: string;
+  /** Wall-clock budget for the facilitator round-trip, in seconds. Default 60. */
   maxTimeoutSeconds?: number;
   resourceUrl?: (req: Request) => string;
   fetchImpl?: typeof fetch;
@@ -58,6 +59,8 @@ export function paywall(opts: PaywallOptions): RequestHandler {
   const facilitatorUrl = (opts.facilitatorUrl ?? "http://localhost:4021").replace(/\/$/, "");
   const fetchImpl = opts.fetchImpl ?? fetch;
   const amount = String(opts.amountWats);
+  const maxTimeoutSeconds = opts.maxTimeoutSeconds ?? 60;
+  const fetchTimeoutMs = maxTimeoutSeconds * 1000;
 
   if (!HTTPS_OR_LOOPBACK.test(facilitatorUrl)) {
     // eslint-disable-next-line no-console
@@ -81,7 +84,7 @@ export function paywall(opts: PaywallOptions): RequestHandler {
       amount,
       asset: "webcash",
       payTo,
-      maxTimeoutSeconds: opts.maxTimeoutSeconds ?? 60,
+      maxTimeoutSeconds,
     };
 
     const resource: ResourceInfo = {
@@ -117,9 +120,14 @@ export function paywall(opts: PaywallOptions): RequestHandler {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(settleReq),
+        signal: AbortSignal.timeout(fetchTimeoutMs),
       });
     } catch (e) {
-      respond402(res, `facilitator unreachable: ${(e as Error).message}`, resource, requirements);
+      const msg = (e as Error).message ?? String(e);
+      const detail = (e as Error).name === "TimeoutError" || msg.toLowerCase().includes("timeout")
+        ? `facilitator timed out after ${maxTimeoutSeconds}s`
+        : `facilitator unreachable: ${msg}`;
+      respond402(res, detail, resource, requirements);
       return;
     }
 
@@ -150,7 +158,32 @@ export function paywall(opts: PaywallOptions): RequestHandler {
 
     const output = (settled.extensions as { webcashOutput?: WebcashOutput } | undefined)?.webcashOutput;
 
-    if (output && opts.onSettled) {
+    // Integrity gate: a successful settlement MUST carry the output secret.
+    // A facilitator that returns success without it has either lost the secret
+    // or stolen it; either way the resource server has not been paid and MUST
+    // NOT serve the resource.
+    if (!isValidOutput(output)) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[x402-webcash][CRITICAL] missing_or_malformed_output_secret ` +
+          `transaction=${settled.transaction} network=${settled.network} ` +
+          `facilitator=${facilitatorUrl}. The facilitator returned success but ` +
+          `did not surface the new bearer token. Funds may have been settled at ` +
+          `the issuer without the resource server receiving them — investigate ` +
+          `the facilitator immediately.`,
+      );
+      respond500(
+        res,
+        "settlement_integrity_failure",
+        `facilitator returned success without extensions.webcashOutput. The funds ` +
+          `may have been replaced at the issuer without persistence on this server. ` +
+          `Audit the facilitator at ${facilitatorUrl}.`,
+        settled.transaction,
+      );
+      return;
+    }
+
+    if (opts.onSettled) {
       try {
         await opts.onSettled(output, req);
       } catch (primaryErr) {
@@ -171,6 +204,17 @@ export function paywall(opts: PaywallOptions): RequestHandler {
     res.setHeader("X-PAYMENT-RESPONSE", Buffer.from(JSON.stringify(settled), "utf8").toString("base64"));
     next();
   };
+}
+
+function isValidOutput(o: unknown): o is WebcashOutput {
+  if (!o || typeof o !== "object") return false;
+  const x = o as Record<string, unknown>;
+  return (
+    typeof x.secret === "string" &&
+    x.secret.length > 0 &&
+    typeof x.amountDecimal === "string" &&
+    typeof x.amountWats === "string"
+  );
 }
 
 async function runRecovery(
