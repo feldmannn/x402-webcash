@@ -7,3 +7,12 @@ dist/
 .vscode/
 .idea/
 coverage/
+# Wallet files contain bearer secrets and MUST NOT be committed. Cover
+# the default paths the examples write to and the conventional names a
+# user might pick locally.
+wallet.json
+wallet.jsonl
+*-wallet.json
+*-wallet.jsonl
+client-wallet.json
+client-wallet.json.tmp
