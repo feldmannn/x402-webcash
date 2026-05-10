@@ -98,10 +98,13 @@ The amount embedded in `secret` (here, `0.3`) MUST match `accepted.amount` after
 
 The facilitator MUST perform the following verification steps in order. Verification MUST NOT replace the secret; replacement happens only at settlement.
 
-1. **Format validation.** Parse `payload.secret` against the regex `^e(\d+(?:\.\d+)?):secret:[0-9a-f]+$`. Reject malformed secrets with `invalidReason: "invalid_payload"`.
-2. **Amount match.** Convert the decimal amount embedded in the secret to wats and compare against `paymentRequirements.amount`. They MUST be exactly equal. Reject mismatches with `invalidReason: "invalid_webcash_amount_mismatch"`.
-3. **Issuer match.** If `extra.issuerUrl` is set, it MUST equal `payTo`. The resolved issuer URL MUST be on the facilitator's allowlist.
-4. **Issuer reachability.** The facilitator SHOULD verify the issuer is responsive (e.g., a small `POST /api/v1/health_check` round-trip) before declaring `isValid: true`. A failed health check returns `invalidReason: "issuer_unreachable"`.
+1. **Format validation.** Parse `payload.secret` against the regex `^e(\d+)(?:\.(\d{1,8}))?:secret:[0-9a-f]+$`. The fractional part is at most 8 digits (wat precision); whitespace and uppercase hex MUST be rejected. Zero-amount secrets MUST be rejected. On failure return `invalidReason: "invalid_webcash_secret_format"`.
+2. **Cross-check `paymentPayload.accepted`.** Its `scheme` and `network` MUST equal those of `paymentRequirements`. On mismatch return `invalidReason: "invalid_payload"`.
+3. **Amount match.** Convert the decimal amount embedded in the secret to wats and compare against `paymentRequirements.amount`. They MUST be exactly equal. Reject mismatches with `invalidReason: "invalid_webcash_amount_mismatch"`.
+4. **Issuer match.** The resolved issuer URL (either `extra.issuerUrl` if set, otherwise the canonical URL for `network`) MUST equal `payTo` AND MUST be on the facilitator's allowlist. On mismatch return `invalidReason: "invalid_network"`.
+5. **Issuer reachability.** The facilitator SHOULD verify the issuer is responsive (e.g., a `POST /api/v1/health_check` round-trip, ideally cached with a short TTL) before declaring `isValid: true`. A failed health check returns `invalidReason: "issuer_unreachable"`.
+
+Settlement skips step 5 — the `/replace` call below is itself the round-trip that proves issuer reachability — but performs steps 1–4.
 
 ### `VerifyResponse`
 
@@ -137,8 +140,37 @@ On success, the input secret is unspendable thereafter (issuer-enforced), and th
 | `amount`      | Echo of `paymentRequirements.amount` (wats)                                                 |
 | `payer`       | Omitted (webcash is anonymous)                                                              |
 | `errorReason` | On failure: `"insufficient_funds"`, `"invalid_payload"`, `"issuer_rejected"`, `"unexpected_settle_error"` |
+| `extensions.webcashOutput` | On success: the newly-minted output secret the resource server now owns (see below)       |
 
 `transaction` is the SHA-256 of the input secret — *not* a chain transaction hash — because webcash settlement does not produce one. This identifier is sufficient to look up the spend event in the issuer's audit log and is unique per spend.
+
+#### `extensions.webcashOutput`
+
+On a successful settlement the facilitator MUST return the bearer secret that now holds the settled funds, so that the resource server can persist it to a wallet. Without this, the funds are unrecoverable.
+
+| Field           | Type     | Description                                                  |
+| --------------- | -------- | ------------------------------------------------------------ |
+| `secret`        | `string` | The new output secret in `e<amount>:secret:<hex>` form        |
+| `amountDecimal` | `string` | Amount in decimal webcash (e.g., `"0.3"`)                    |
+| `amountWats`    | `string` | Amount in wats as a decimal string (echoes `amount`)         |
+
+```json
+{
+  "success": true,
+  "transaction": "9f86d081...",
+  "network": "webcash:mainnet",
+  "amount": "30000000",
+  "extensions": {
+    "webcashOutput": {
+      "secret": "e0.3:secret:b2c3d4e5...",
+      "amountDecimal": "0.3",
+      "amountWats": "30000000"
+    }
+  }
+}
+```
+
+**Resource servers MUST persist `extensions.webcashOutput.secret` to a wallet before considering the transaction complete.** A successful 200 response without persistence is an irrecoverable loss of funds. Implementations should fail the request (return 402) if persistence raises.
 
 ## Security Considerations
 

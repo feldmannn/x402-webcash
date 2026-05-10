@@ -4,7 +4,9 @@
 
 import { createHash, randomBytes } from "node:crypto";
 
-const SECRET_RE = /^e(\d+(?:\.\d+)?):secret:([0-9a-f]+)$/;
+// Strict: leading "e", up to 8 fractional digits (wat precision), no whitespace,
+// lowercase hex only. Whole and fractional parts both required to be present.
+const SECRET_RE = /^e(\d+)(?:\.(\d{1,8}))?:secret:([0-9a-f]+)$/;
 
 export const KNOWN_NETWORKS: Record<string, string> = {
   "webcash:mainnet": "https://webcash.org",
@@ -19,14 +21,17 @@ export type ParsedSecret = {
 };
 
 export function parseSecret(s: string): ParsedSecret | null {
-  const m = SECRET_RE.exec(s.trim());
+  if (typeof s !== "string") return null;
+  const m = SECRET_RE.exec(s);
   if (!m) return null;
-  const decimal = m[1];
-  const hex = m[2];
-  const [whole, frac = ""] = decimal.split(".");
+  const whole = m[1];
+  const frac = m[2] ?? "";
+  const hex = m[3];
   const padded = (frac + "00000000").slice(0, 8);
   const wats = BigInt(whole) * 100_000_000n + BigInt(padded || "0");
-  return { decimal, wats, hex, raw: s.trim() };
+  if (wats === 0n) return null;
+  const decimal = frac ? `${whole}.${frac}` : whole;
+  return { decimal, wats, hex, raw: s };
 }
 
 export function watsToDecimal(wats: bigint): string {
@@ -87,8 +92,8 @@ export async function replaceSecret(
   }
   if (!res.ok) {
     const body = await safeJson(res);
-    const reason = (body && typeof body === "object" && "error" in body && typeof (body as any).error === "string")
-      ? (body as any).error
+    const reason = (body && typeof body === "object" && "error" in body && typeof (body as { error: unknown }).error === "string")
+      ? (body as { error: string }).error
       : `issuer_status_${res.status}`;
     return { ok: false, status: res.status, reason };
   }

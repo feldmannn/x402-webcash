@@ -12,10 +12,42 @@ test("parseSecret accepts valid form", () => {
   assert.equal(p!.wats, 30_000_000n);
 });
 
+test("parseSecret accepts whole-number amounts", () => {
+  const p = parseSecret("e1:secret:abcdef");
+  assert.ok(p);
+  assert.equal(p!.wats, 100_000_000n);
+});
+
+test("parseSecret accepts up to 8 fractional digits", () => {
+  const p = parseSecret("e0.00000001:secret:ab");
+  assert.ok(p);
+  assert.equal(p!.wats, 1n);
+});
+
+test("parseSecret rejects more than 8 fractional digits", () => {
+  assert.equal(parseSecret("e0.123456789:secret:ab"), null);
+});
+
+test("parseSecret rejects whitespace", () => {
+  assert.equal(parseSecret(" e0.3:secret:ab"), null);
+  assert.equal(parseSecret("e0.3:secret:ab "), null);
+  assert.equal(parseSecret("e0.3:secret: ab"), null);
+});
+
+test("parseSecret rejects uppercase hex", () => {
+  assert.equal(parseSecret("e0.3:secret:ABCDEF"), null);
+});
+
 test("parseSecret rejects malformed input", () => {
   assert.equal(parseSecret("not a secret"), null);
   assert.equal(parseSecret("e1:nope:abcdef"), null);
   assert.equal(parseSecret("e1.0:secret:NOTHEX"), null);
+});
+
+test("parseSecret rejects zero amount", () => {
+  assert.equal(parseSecret("e0:secret:abcdef"), null);
+  assert.equal(parseSecret("e0.0:secret:abcdef"), null);
+  assert.equal(parseSecret("e0.00000000:secret:abcdef"), null);
 });
 
 test("watsToDecimal round-trips integers and fractions", () => {
@@ -35,30 +67,23 @@ function fakeFetch(handlers: Record<string, (init: RequestInit) => Response | Pr
 }
 
 function buildReq(overrides: Partial<FacilitatorRequest["paymentRequirements"]> = {}, secret = "e0.3:secret:abcdef"): FacilitatorRequest {
+  const accepted = {
+    scheme: "webcash",
+    network: "webcash:mainnet",
+    amount: "30000000",
+    asset: "webcash",
+    payTo: "https://webcash.org",
+    maxTimeoutSeconds: 60,
+    ...overrides,
+  };
   return {
     x402Version: 2,
     paymentPayload: {
       x402Version: 2,
-      accepted: {
-        scheme: "webcash",
-        network: "webcash:mainnet",
-        amount: "30000000",
-        asset: "webcash",
-        payTo: "https://webcash.org",
-        maxTimeoutSeconds: 60,
-        ...overrides,
-      },
+      accepted,
       payload: { secret },
     },
-    paymentRequirements: {
-      scheme: "webcash",
-      network: "webcash:mainnet",
-      amount: "30000000",
-      asset: "webcash",
-      payTo: "https://webcash.org",
-      maxTimeoutSeconds: 60,
-      ...overrides,
-    },
+    paymentRequirements: { ...accepted },
   };
 }
 
@@ -82,14 +107,40 @@ test("verify rejects malformed secret", async () => {
   assert.equal(v.invalidReason, "invalid_webcash_secret_format");
 });
 
-test("verify rejects non-allowlisted issuer", async () => {
+test("verify rejects non-allowlisted issuer override", async () => {
   const f = new Facilitator();
-  const req = buildReq();
+  const req = buildReq({ payTo: "https://evil.example" });
   req.paymentRequirements.extra = { issuerUrl: "https://evil.example" };
-  req.paymentRequirements.payTo = "https://evil.example";
+  req.paymentPayload.accepted.payTo = "https://evil.example";
   const v = await f.verify(req);
   assert.equal(v.isValid, false);
   assert.equal(v.invalidReason, "invalid_network");
+});
+
+test("verify rejects payTo that does not match canonical issuer", async () => {
+  const f = new Facilitator({
+    fetchImpl: fakeFetch({
+      "/api/v1/health_check": () => new Response("{}", { status: 200 }),
+    }),
+  });
+  const req = buildReq({ payTo: "https://attacker.example" });
+  req.paymentPayload.accepted.payTo = "https://attacker.example";
+  const v = await f.verify(req);
+  assert.equal(v.isValid, false);
+  assert.equal(v.invalidReason, "invalid_network");
+});
+
+test("verify rejects mismatched paymentPayload.accepted.scheme", async () => {
+  const f = new Facilitator({
+    fetchImpl: fakeFetch({
+      "/api/v1/health_check": () => new Response("{}", { status: 200 }),
+    }),
+  });
+  const req = buildReq();
+  req.paymentPayload.accepted.scheme = "exact";
+  const v = await f.verify(req);
+  assert.equal(v.isValid, false);
+  assert.equal(v.invalidReason, "invalid_payload");
 });
 
 test("verify accepts a valid request when issuer is healthy", async () => {
@@ -102,10 +153,26 @@ test("verify accepts a valid request when issuer is healthy", async () => {
   assert.equal(v.isValid, true);
 });
 
+test("verify caches issuer health within TTL", async () => {
+  let healthCalls = 0;
+  const f = new Facilitator({
+    healthCacheTtlMs: 60_000,
+    fetchImpl: fakeFetch({
+      "/api/v1/health_check": () => {
+        healthCalls += 1;
+        return new Response("{}", { status: 200 });
+      },
+    }),
+  });
+  await f.verify(buildReq());
+  await f.verify(buildReq());
+  await f.verify(buildReq());
+  assert.equal(healthCalls, 1);
+});
+
 test("settle returns transaction = sha256 of input secret on success", async () => {
   const f = new Facilitator({
     fetchImpl: fakeFetch({
-      "/api/v1/health_check": () => new Response("{}", { status: 200 }),
       "/api/v1/replace": () => new Response("{}", { status: 200 }),
     }),
     mintOutputSecret: () => newOutputSecret("0.3"),
@@ -117,10 +184,47 @@ test("settle returns transaction = sha256 of input secret on success", async () 
   assert.equal(s.amount, "30000000");
 });
 
+test("settle exposes the output secret in extensions", async () => {
+  const minted = newOutputSecret("0.3");
+  const f = new Facilitator({
+    fetchImpl: fakeFetch({
+      "/api/v1/replace": () => new Response("{}", { status: 200 }),
+    }),
+    mintOutputSecret: () => minted,
+  });
+  const s = await f.settle(buildReq());
+  assert.equal(s.success, true);
+  const ext = s.extensions as { webcashOutput?: { secret: string; amountDecimal: string; amountWats: string } };
+  assert.ok(ext?.webcashOutput);
+  assert.equal(ext.webcashOutput!.secret, minted);
+  assert.equal(ext.webcashOutput!.amountDecimal, "0.3");
+  assert.equal(ext.webcashOutput!.amountWats, "30000000");
+});
+
+test("settle does not call /api/v1/health_check (replace is the round-trip)", async () => {
+  let healthCalls = 0;
+  let replaceCalls = 0;
+  const f = new Facilitator({
+    fetchImpl: fakeFetch({
+      "/api/v1/health_check": () => {
+        healthCalls += 1;
+        return new Response("{}", { status: 200 });
+      },
+      "/api/v1/replace": () => {
+        replaceCalls += 1;
+        return new Response("{}", { status: 200 });
+      },
+    }),
+  });
+  const s = await f.settle(buildReq());
+  assert.equal(s.success, true);
+  assert.equal(healthCalls, 0);
+  assert.equal(replaceCalls, 1);
+});
+
 test("settle surfaces issuer rejection as issuer_rejected", async () => {
   const f = new Facilitator({
     fetchImpl: fakeFetch({
-      "/api/v1/health_check": () => new Response("{}", { status: 200 }),
       "/api/v1/replace": () => new Response(JSON.stringify({ error: "already spent" }), { status: 400 }),
     }),
   });
@@ -128,6 +232,17 @@ test("settle surfaces issuer rejection as issuer_rejected", async () => {
   assert.equal(s.success, false);
   assert.equal(s.errorReason, "issuer_rejected");
   assert.equal(s.transaction, "");
+});
+
+test("settle reports network errors as issuer_unreachable", async () => {
+  const f = new Facilitator({
+    fetchImpl: (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as typeof fetch,
+  });
+  const s = await f.settle(buildReq());
+  assert.equal(s.success, false);
+  assert.equal(s.errorReason, "issuer_unreachable");
 });
 
 test("supported lists webcash kinds", () => {
