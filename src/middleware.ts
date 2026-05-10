@@ -28,6 +28,12 @@ export type PaywallOptions = {
   /** Wall-clock budget for the facilitator round-trip, in seconds. Default 60. */
   maxTimeoutSeconds?: number;
   resourceUrl?: (req: Request) => string;
+  /**
+   * Scheme-specific extra fields propagated into `paymentRequirements.extra`.
+   * Use for `extra.issuerUrl` to settle against a custom webcash issuer
+   * (the URL must also be on the facilitator's allowlist).
+   */
+  extra?: Record<string, unknown>;
   fetchImpl?: typeof fetch;
   /**
    * Called after a successful settlement with the newly-minted output secret.
@@ -85,6 +91,7 @@ export function paywall(opts: PaywallOptions): RequestHandler {
       asset: "webcash",
       payTo,
       maxTimeoutSeconds,
+      ...(opts.extra ? { extra: opts.extra } : {}),
     };
 
     const resource: ResourceInfo = {

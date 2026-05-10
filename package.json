@@ -10,7 +10,7 @@
     "build": "tsc",
     "facilitator": "tsx src/server.ts",
     "example": "tsx examples/express-server.ts",
-    "test": "node --test --import tsx tests/*.test.ts"
+    "test": "node --test --import tsx tests/basic.test.ts tests/middleware.test.ts tests/integration.test.ts tests/e2e.test.ts"
   },
   "dependencies": {
     "express": "^4.21.2"
