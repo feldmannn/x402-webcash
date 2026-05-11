@@ -84,6 +84,9 @@ export class FileWallet implements Wallet {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw err;
     }
+    // Strip UTF-8 BOM: Windows tools (PowerShell's `Set-Content -Encoding utf8`,
+    // some editors) write UTF-8 with a leading BOM that JSON.parse rejects.
+    if (buf.charCodeAt(0) === 0xfeff) buf = buf.slice(1);
     let parsed: unknown;
     try {
       parsed = JSON.parse(buf);
