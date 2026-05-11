@@ -1,8 +1,26 @@
 {
   "name": "x402-webcash",
-  "version": "0.4.0",
-  "description": "x402 payment scheme for webcash bearer e-cash",
+  "version": "0.5.0",
+  "description": "x402 payment scheme for webcash bearer e-cash — facilitator, middleware, and a transport-agnostic client that auto-settles HTTP 402 challenges from a local wallet.",
   "license": "MIT",
+  "author": "Nate Feldmann",
+  "homepage": "https://github.com/feldmannn/x402-webcash",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/feldmannn/x402-webcash.git"
+  },
+  "bugs": {
+    "url": "https://github.com/feldmannn/x402-webcash/issues"
+  },
+  "keywords": [
+    "x402",
+    "webcash",
+    "http-402",
+    "bearer-token",
+    "e-cash",
+    "agent-payments",
+    "micropayments"
+  ],
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -16,6 +34,12 @@
       "import": "./dist/client/index.js"
     }
   },
+  "files": [
+    "dist",
+    "specs",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepare": "npm run build",
