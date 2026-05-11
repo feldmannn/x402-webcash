@@ -9,7 +9,8 @@ This repo contains:
 - **`src/client/`** — a transport-agnostic client (also exported as `x402-webcash/client`): `FileWallet`, `buildWebcashHeader`, and a `wrapFetchWithWebcash` fetch adapter that auto-settles 402s.
 - **`examples/express-server.ts`** — a tiny Express resource server that paywalls an endpoint using this facilitator.
 - **`examples/fetch-client.ts`** — a client that spends a webcash secret to call the paywalled endpoint above.
-- **`examples/mcp-server.ts`** — a stdio MCP server that exposes the paywalled endpoint as an MCP tool; Claude Desktop (or any MCP client) can call it and the server settles in webcash transparently.
+
+For exposing webcash payments to AI agents over MCP, see the separate **[`webcash-mcp`](https://github.com/feldmannn/webcash-mcp)** project — a general-purpose MCP server that wraps this library.
 
 ## Why
 
@@ -101,40 +102,13 @@ secrets are logged to stderr with the `[x402-webcash][CRITICAL]` marker
 so an operator can recover them. See `splitToMatch` for the full
 failure-mode contract.
 
-### Wiring into an MCP server
+### Using with AI agents (MCP)
 
-`examples/mcp-server.ts` is a runnable stdio MCP server that exposes
-the paywalled `/premium` endpoint as a tool. The MCP SDK is a
-devDependency of this repo (consumers of `x402-webcash` who don't want
-MCP do not need to install it).
-
-Three-terminal demo:
-
-```bash
-npm run facilitator     # :4021
-npm run example         # :4020 (paywalled /premium)
-npm run example:mcp     # stdio MCP server
-```
-
-Then add the MCP server to `claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "x402-webcash-demo": {
-      "command": "npx",
-      "args": ["tsx", "/absolute/path/to/examples/mcp-server.ts"],
-      "env": { "WEBCASH_WALLET": "/absolute/path/to/client-wallet.json" }
-    }
-  }
-}
-```
-
-Calling the `get-premium-data` tool triggers a 402 from the resource
-server; the wrapped fetch takes a webcash secret from the wallet
-(auto-splitting a larger one if needed), retries with X-PAYMENT, and
-returns the 200 body to the agent. See `examples/mcp-server.ts` for the
-~30 lines of glue.
+If you want AI agents to be able to pay webcash-protected URLs over MCP,
+use [**webcash-mcp**](https://github.com/feldmannn/webcash-mcp) — a
+general-purpose stdio MCP server built on top of this library. It exposes
+`pay_fetch`, `wallet_balance`, `wallet_import`, and `wallet_status` tools
+that any MCP client (Claude Desktop, etc.) can call.
 
 ## License
 
