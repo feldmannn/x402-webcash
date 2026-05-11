@@ -10,9 +10,13 @@ const issuerAllowlist = (process.env.WEBCASH_ISSUER_ALLOWLIST ?? "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+// Operator opt-out for HTTPS-only enforcement on issuer URLs. Defaults
+// to false. Set WEBCASH_ALLOW_HTTP_ISSUER=1 only for local test rigs
+// pointed at a sandbox issuer over HTTP.
+const allowHttpIssuer = /^(1|true|yes)$/i.test(process.env.WEBCASH_ALLOW_HTTP_ISSUER ?? "");
 const corsOrigin = process.env.CORS_ORIGIN ?? "*";
 
-const facilitator = new Facilitator({ issuerAllowlist });
+const facilitator = new Facilitator({ issuerAllowlist, allowHttpIssuer });
 const app = express();
 app.use(express.json({ limit: "64kb" }));
 

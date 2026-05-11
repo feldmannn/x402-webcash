@@ -2,6 +2,7 @@
 // Talks to a separate facilitator service (default http://localhost:4021).
 
 import type { NextFunction, Request, RequestHandler, Response } from "express";
+import { isAcceptableIssuerScheme } from "./facilitator.js";
 import type {
   FacilitatorRequest,
   PaymentPayload,
@@ -55,9 +56,14 @@ export type PaywallOptions = {
     originalError: unknown,
     req: Request,
   ) => void | Promise<void>;
+  /**
+   * Permit non-HTTPS facilitator URLs that aren't loopback. Defaults to
+   * false: misconfigured facilitator URLs throw at construction time
+   * instead of silently transmitting bearer secrets over plaintext. Set
+   * true only for test rigs.
+   */
+  allowHttpFacilitator?: boolean;
 };
-
-const HTTPS_OR_LOOPBACK = /^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$))/i;
 
 export function paywall(opts: PaywallOptions): RequestHandler {
   const network = opts.network ?? "webcash:mainnet";
@@ -68,11 +74,12 @@ export function paywall(opts: PaywallOptions): RequestHandler {
   const maxTimeoutSeconds = opts.maxTimeoutSeconds ?? 60;
   const fetchTimeoutMs = maxTimeoutSeconds * 1000;
 
-  if (!HTTPS_OR_LOOPBACK.test(facilitatorUrl)) {
-    // eslint-disable-next-line no-console
-    console.warn(
+  if (!isAcceptableIssuerScheme(facilitatorUrl, opts.allowHttpFacilitator ?? false)) {
+    throw new Error(
       `[x402-webcash] facilitatorUrl "${facilitatorUrl}" is neither HTTPS nor loopback. ` +
-        `Webcash secrets will transit in plaintext and can be stolen by any network observer.`,
+        `Refusing to install paywall — webcash secrets would transit in plaintext ` +
+        `from the resource server to the facilitator and could be stolen by any ` +
+        `on-path observer. Pass allowHttpFacilitator:true to override (test rigs only).`,
     );
   }
   if (!opts.onSettled) {

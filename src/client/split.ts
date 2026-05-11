@@ -18,6 +18,7 @@
 //     required secret. If change persistence fails the change secret is
 //     CRITICAL-logged so it can be manually recovered.
 
+import { isAcceptableIssuerScheme } from "../facilitator.js";
 import { DEFAULT_LEGALESE, DEFAULT_ISSUER_TIMEOUT_MS, newOutputSecret, parseSecret, replaceSecret, watsToDecimal } from "../webcash.js";
 import type { Wallet } from "./wallet.js";
 
@@ -28,7 +29,25 @@ export type SplitOptions = {
   timeoutMs?: number;
   /** Override the change-secret minter (used by tests to make outputs deterministic). */
   mintOutputSecret?: (amountDecimal: string) => string;
+  /**
+   * Allow non-HTTPS issuer URLs for this split. Defaults to false. The
+   * issuer call carries a bearer secret; allowing HTTP outside loopback
+   * means any on-path observer can steal it. Test rigs only.
+   */
+  allowHttpIssuer?: boolean;
 };
+
+export class InsecureIssuerError extends Error {
+  readonly issuerUrl: string;
+  constructor(issuerUrl: string) {
+    super(
+      `refusing to call issuer at "${issuerUrl}" — not HTTPS and not loopback. ` +
+        `Webcash secrets would transit in plaintext. Pass allowHttpIssuer:true to override (test only).`,
+    );
+    this.name = "InsecureIssuerError";
+    this.issuerUrl = issuerUrl;
+  }
+}
 
 export class NoSplittableSecretError extends Error {
   readonly requiredWats: string;
@@ -89,6 +108,12 @@ export async function splitToMatch(
   const target = BigInt(requiredWats);
   if (target <= 0n) {
     throw new Error("splitToMatch requires a positive wat amount");
+  }
+
+  // Fail before any wallet mutation if the issuer URL would put secrets
+  // on the wire in plaintext.
+  if (!isAcceptableIssuerScheme(opts.issuerUrl, opts.allowHttpIssuer ?? false)) {
+    throw new InsecureIssuerError(opts.issuerUrl);
   }
 
   const candidates = await wallet.list();

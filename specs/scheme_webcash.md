@@ -1,6 +1,6 @@
 # Scheme: `webcash`
 
-**Status:** Draft v0 (not yet proposed upstream)
+**Status:** Draft v0 (not yet proposed upstream — see reference implementation 0.4.0 status in the repo README for what is implemented vs reserved)
 **x402 protocol version:** 2
 
 ## Summary
@@ -266,9 +266,14 @@ The canonical webcash issuer at `https://webcash.org` exposes (subject to change
 
 ### Open items
 
-- **Issuer-URL allowlisting policy.** The reference facilitator hardcodes `webcash.org`; production deployments need a configurable allowlist with audit.
 - **Issuer-side discovery.** No standard exists yet for a webcash issuer to advertise its endpoints; this scheme assumes `payTo` is a base URL with the standard webcash.org API shape.
+- **`extra.recipientPublicHash`** is reserved here but no concrete mechanism exists yet to *enforce* it without protocol-level changes. The intent — bind the new output secret to a hash the resource server pre-published, so the facilitator cannot substitute its own — requires the facilitator to know the pre-image, which puts the facilitator and resource server in the same trust position. Practical mitigations until this is designed: (a) the resource server self-hosts the facilitator, eliminating the third-party trust gap, or (b) the resource server treats its facilitator as part of its trusted set, which the spec already requires.
+- **TLS certificate / SPKI pinning.** The current implementation enforces HTTPS scheme (https:// or loopback) but does not pin certificate fingerprints. A determined adversary with a CA-issued cert for the issuer hostname would still be able to MITM. Out of scope for v0.x; would require a custom dispatcher.
 - **Generalization to other bearer-secret rails.** A future `bearer-secret` scheme family could cover webcash, vouchers (e.g., harmoniis vouchers), and Lightning hold-invoices under one umbrella. Out of scope for this draft.
+
+### Client-side persistence
+
+Client implementations SHOULD journal the bearer secret to a durable store immediately after taking it from the wallet and before the network request is sent. The takeExact -> request -> response window is the equivalent client-side risk of the server-side "funds-already-moved" path: if the process crashes mid-request, the secret is no longer in the wallet but has not yet been spent at the issuer, and on restart the client has no way to know which secrets are in flight. The reference client (`wrapFetchWithWebcash`) exposes a `journal` hook for exactly this purpose.
 
 ## References
 

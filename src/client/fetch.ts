@@ -34,6 +34,21 @@ export type WrapFetchOptions = {
    * the 402 challenge itself.
    */
   autoSplit?: AutoSplitOptions;
+  /**
+   * Pre-flight journal hook. Fires immediately after a secret is taken
+   * from the wallet but BEFORE the X-PAYMENT retry is sent. The caller's
+   * chance to write the secret to a durable journal so that an
+   * unexpected process crash (between this point and the response coming
+   * back) does not silently lose an unspent secret.
+   *
+   * If this hook throws, the secret is returned to the wallet and the
+   * request is NOT retried — surfaced as the same error.
+   *
+   * Recommended in production: write the secret + a timestamp + a unique
+   * call id to an append-only file, then on startup reconcile against the
+   * issuer to determine which journaled secrets are still unspent.
+   */
+  journal?: (info: { secret: string; amountWats: string; url: string }) => void | Promise<void>;
 };
 
 type FetchLike = typeof fetch;
@@ -49,7 +64,7 @@ type RetriedInit = RequestInit & { [k: symbol]: boolean };
  * (the caller can chain another wrapper for those).
  */
 export function wrapFetchWithWebcash(fetchImpl: FetchLike, opts: WrapFetchOptions): FetchLike {
-  const { wallet, onAmbiguous, autoSplit } = opts;
+  const { wallet, onAmbiguous, autoSplit, journal } = opts;
 
   const wrapped: FetchLike = async (input, init) => {
     const initObj = (init ?? {}) as RetriedInit;
@@ -85,6 +100,30 @@ export function wrapFetchWithWebcash(fetchImpl: FetchLike, opts: WrapFetchOption
     if (!built) {
       // 402 did not offer webcash; let the caller's other handlers run.
       return first;
+    }
+
+    // Journal the secret BEFORE the retry is sent. If the journal write
+    // throws, return the secret to the wallet and surface — we'd rather
+    // fail the request than send a secret we couldn't durably record.
+    if (journal) {
+      try {
+        await journal({
+          secret: built.secret,
+          amountWats: built.requirements.amount,
+          url: typeof input === "string" ? input : input.toString(),
+        });
+      } catch (err) {
+        try {
+          await wallet.put(built.secret);
+        } catch (putErr) {
+          criticalLog(
+            `wallet_put_failed_after_journal_threw secret=${built.secret} ` +
+              `journalError=${(err as Error)?.message ?? String(err)} ` +
+              `putError=${(putErr as Error)?.message ?? String(putErr)}`,
+          );
+        }
+        throw err;
+      }
     }
 
     const retryInit: RetriedInit = {

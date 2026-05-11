@@ -41,6 +41,14 @@ export type FacilitatorOptions = {
   legalese?: Record<string, unknown>;
   /** Per-request timeout for issuer calls, in milliseconds. Default 30000. */
   issuerTimeoutMs?: number;
+  /**
+   * Allow non-HTTPS issuer URLs (HTTP, or other schemes). Defaults to
+   * false: any allowlisted URL that is not `https://` and not a loopback
+   * address is rejected at construction time. Only set this true for
+   * local test rigs — webcash secrets transmitted over plaintext can be
+   * stolen by any on-path observer.
+   */
+  allowHttpIssuer?: boolean;
 };
 
 type Validated = {
@@ -62,7 +70,20 @@ export class Facilitator {
 
   constructor(opts: FacilitatorOptions = {}) {
     const defaults = Object.values(KNOWN_NETWORKS);
-    this.allowlist = new Set([...defaults, ...(opts.issuerAllowlist ?? [])]);
+    const candidates = [...defaults, ...(opts.issuerAllowlist ?? [])];
+    const allowHttp = opts.allowHttpIssuer ?? false;
+    // Fail fast on construction — operator typos in the allowlist should
+    // not silently degrade to plaintext secret transmission in production.
+    for (const url of candidates) {
+      if (!isAcceptableIssuerScheme(url, allowHttp)) {
+        throw new Error(
+          `[x402-webcash] issuer URL "${url}" is not HTTPS and not loopback. ` +
+            `Refusing to construct facilitator — webcash secrets would transit in plaintext. ` +
+            `Pass allowHttpIssuer:true to override (test rigs only).`,
+        );
+      }
+    }
+    this.allowlist = new Set(candidates);
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.mintOutputSecret = opts.mintOutputSecret ?? newOutputSecret;
     this.healthCacheTtlMs = opts.healthCacheTtlMs ?? 5000;
@@ -232,4 +253,27 @@ function mapIssuerReason(reason: string): string {
   if (r.includes("invalid_payload") || r.includes("malformed")) return "invalid_payload";
   if (r.includes("legalese")) return "invalid_payment_requirements";
   return "issuer_rejected";
+}
+
+/**
+ * Returns true if `url` is `https://` or points at a loopback address
+ * (`http://localhost`, `http://127.0.0.1`, `http://[::1]`). Loopback HTTP
+ * is allowed unconditionally because it never leaves the host; remote
+ * HTTP would put secrets on the wire in plaintext.
+ *
+ * When `allowHttp` is true, any well-formed URL passes — operator opt-in
+ * for test rigs against a sandbox issuer.
+ */
+export function isAcceptableIssuerScheme(url: string, allowHttp: boolean): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol === "https:") return true;
+  if (parsed.protocol !== "http:") return false;
+  if (allowHttp) return true;
+  const host = parsed.hostname.toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
 }

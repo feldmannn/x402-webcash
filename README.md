@@ -19,7 +19,23 @@ Adding `webcash` as an x402 scheme means any x402-aware client gains the ability
 
 ## Status
 
-Early. Spec is v0 and unproposed. Facilitator is reference-quality, not production. Issuer URL allowlisting and TLS-pinning are open items. See `specs/scheme_webcash.md` for the gaps.
+Early. Spec is v0 and unproposed.
+
+What's in place as of 0.4.0:
+
+- **Issuer URL allowlist:** `FacilitatorOptions.issuerAllowlist` (or `WEBCASH_ISSUER_ALLOWLIST=url1,url2` env var). Canonical webcash.org issuers are always included. Any `extra.issuerUrl` outside the allowlist is rejected at verify with `invalid_network`.
+- **HTTPS enforcement:** facilitator, paywall middleware, and the client-side splitter all reject non-HTTPS issuer/facilitator URLs that are not loopback. Opt-out (`allowHttpIssuer` / `allowHttpFacilitator` / `WEBCASH_ALLOW_HTTP_ISSUER=1`) is reserved for test rigs.
+- **Concurrency-safe FileWallet:** in-process mutex serializes wallet operations so concurrent `takeExact` calls cannot double-spend or clobber writes. Not safe across processes — use SQLite/keychain-backed wallets for multi-process deployments.
+- **Pre-flight journal hook:** `wrapFetchWithWebcash` accepts a `journal` callback that fires after a secret is taken from the wallet but before the request is sent, so a process crash mid-request can be reconciled.
+- **Full failure-mode coverage** for: settlement integrity (server-side), ambiguous response (client-side), split rejection vs split ambiguity, persistence-failure recovery hooks, and `[x402-webcash][CRITICAL]` stderr breadcrumbs on every fund-loss path.
+
+Still open / future work:
+
+- TLS certificate / SPKI pinning beyond simple HTTPS enforcement (requires custom dispatcher; out of scope for v0.x).
+- `extra.recipientPublicHash` is reserved in the spec but the underlying mechanism for binding an output secret to a recipient hash needs more design — without a protocol-level binding, the facilitator can substitute its own output. The practical mitigation today is "the facilitator is part of your trusted set" or "self-host the facilitator inside your resource server."
+- No security audit by a third party. Production deployments should review the codebase themselves until that lands.
+
+See `specs/scheme_webcash.md` for the spec-level discussion of these.
 
 ## Quick start
 

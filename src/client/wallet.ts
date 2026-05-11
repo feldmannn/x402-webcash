@@ -7,9 +7,18 @@
 // did not run). Persistence is the wallet's responsibility — middleware-side
 // callbacks (`onSettled`/`onSettledRecovery`) handle the server-side path.
 //
-// This file ships a FileWallet (JSON file, single-process). Real deployments
-// should swap in a SQLite-backed or keychain-backed wallet that supports
-// concurrent access and OS-level secret protection.
+// Concurrency model: FileWallet serializes every operation via an
+// in-process mutex. Two concurrent takeExact/take/put calls from the same
+// process will run one after the other, so a wallet with N matching
+// secrets handed to N concurrent callers will return one secret to each
+// — never the same secret to two callers, and never a clobbered write.
+//
+// FileWallet is NOT safe for concurrent use ACROSS processes. Two node
+// processes pointed at the same wallet file will race at the filesystem
+// layer and can lose secrets. For multi-process deployments use a
+// SQLite-backed or keychain-backed wallet implementing the Wallet
+// interface; the contract this module relies on is exactly the four
+// methods below.
 
 import { promises as fs } from "node:fs";
 import { parseSecret } from "../webcash.js";
@@ -38,14 +47,34 @@ export interface Wallet {
 
 /**
  * File-backed JSON wallet. Reads and writes the whole file on each
- * operation, using a temp-file + rename for write atomicity. Safe for a
- * single process; concurrent writers from multiple processes will race
- * and can lose secrets. Use SQLite or a keychain wallet for production.
+ * operation, using a temp-file + rename for write atomicity. Operations
+ * are serialized via an in-process mutex so concurrent callers from the
+ * same process cannot double-spend or clobber each other's writes.
+ *
+ * NOT safe for concurrent use ACROSS processes. See file header comment.
  *
  * File shape: `{ "secrets": ["e<amount>:secret:<hex>", ...] }`.
  */
 export class FileWallet implements Wallet {
+  // Per-instance serialization chain. Every public method appends its
+  // work to this promise so operations run one-at-a-time. We never read
+  // the resolved value; the chain exists only to gate execution order.
+  private tail: Promise<unknown> = Promise.resolve();
+
   constructor(private readonly path: string) {}
+
+  /**
+   * Append `work` to the serialization chain and return its result. The
+   * chain absorbs rejections so a thrown handler does not poison
+   * subsequent operations.
+   */
+  private serialize<T>(work: () => Promise<T>): Promise<T> {
+    const run = this.tail.then(work, work);
+    // Swallow errors on the chain itself; callers see them via the
+    // returned promise.
+    this.tail = run.catch(() => undefined);
+    return run;
+  }
 
   private async read(): Promise<string[]> {
     let buf: string;
@@ -75,38 +104,44 @@ export class FileWallet implements Wallet {
   }
 
   async takeExact(wats: string): Promise<string | null> {
-    const target = BigInt(wats);
-    const secrets = await this.read();
-    const idx = secrets.findIndex((s) => {
-      const parsed = parseSecret(s);
-      return parsed !== null && parsed.wats === target;
+    return this.serialize(async () => {
+      const target = BigInt(wats);
+      const secrets = await this.read();
+      const idx = secrets.findIndex((s) => {
+        const parsed = parseSecret(s);
+        return parsed !== null && parsed.wats === target;
+      });
+      if (idx < 0) return null;
+      const [picked] = secrets.splice(idx, 1);
+      await this.write(secrets);
+      return picked!;
     });
-    if (idx < 0) return null;
-    const [picked] = secrets.splice(idx, 1);
-    await this.write(secrets);
-    return picked!;
   }
 
   async take(secret: string): Promise<boolean> {
-    const secrets = await this.read();
-    const idx = secrets.indexOf(secret);
-    if (idx < 0) return false;
-    secrets.splice(idx, 1);
-    await this.write(secrets);
-    return true;
+    return this.serialize(async () => {
+      const secrets = await this.read();
+      const idx = secrets.indexOf(secret);
+      if (idx < 0) return false;
+      secrets.splice(idx, 1);
+      await this.write(secrets);
+      return true;
+    });
   }
 
   async put(secret: string): Promise<void> {
     if (parseSecret(secret) === null) {
       throw new Error("refusing to put malformed secret into wallet");
     }
-    const secrets = await this.read();
-    secrets.push(secret);
-    await this.write(secrets);
+    await this.serialize(async () => {
+      const secrets = await this.read();
+      secrets.push(secret);
+      await this.write(secrets);
+    });
   }
 
   async list(): Promise<string[]> {
-    return this.read();
+    return this.serialize(() => this.read());
   }
 }
 

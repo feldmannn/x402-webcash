@@ -10,6 +10,7 @@ export { buildWebcashHeader, NoMatchingSecretError, WEBCASH_SCHEME } from "./sch
 export type { AutoSplitOptions, BuildHeaderOptions, BuiltHeader } from "./scheme.js";
 export {
   AmbiguousSplitError,
+  InsecureIssuerError,
   IssuerRejectedSplitError,
   NoSplittableSecretError,
   splitToMatch,
