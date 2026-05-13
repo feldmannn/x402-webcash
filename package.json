@@ -1,6 +1,6 @@
 {
   "name": "x402-webcash",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "x402 payment scheme for webcash bearer e-cash — facilitator, middleware, and a transport-agnostic client that auto-settles HTTP 402 challenges from a local wallet.",
   "license": "MIT",
   "author": "Nate Feldmann",
@@ -46,7 +46,7 @@
     "facilitator": "tsx src/server.ts",
     "example": "tsx examples/express-server.ts",
     "example:client": "tsx examples/fetch-client.ts",
-    "test": "node --test --import tsx tests/basic.test.ts tests/middleware.test.ts tests/client.test.ts tests/split.test.ts tests/security.test.ts tests/integration.test.ts tests/e2e.test.ts"
+    "test": "node --test --import tsx tests/basic.test.ts tests/middleware.test.ts tests/client.test.ts tests/split.test.ts tests/security.test.ts tests/integration.test.ts tests/e2e.test.ts tests/mcp-settler.test.ts"
   },
   "dependencies": {
     "express": "^4.21.2"

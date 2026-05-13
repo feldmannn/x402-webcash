@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 import { Facilitator } from "../src/facilitator.js";
-import { newOutputSecret, parseSecret, watsToDecimal } from "../src/webcash.js";
+import { decimalToWats, newOutputSecret, parseSecret, watsToDecimal } from "../src/webcash.js";
 import type { FacilitatorRequest } from "../src/types.js";
 
 test("parseSecret accepts valid form", () => {
@@ -62,6 +62,48 @@ test("watsToDecimal round-trips integers and fractions", () => {
   assert.equal(watsToDecimal(100_000_000n), "1");
   assert.equal(watsToDecimal(30_000_000n), "0.3");
   assert.equal(watsToDecimal(1n), "0.00000001");
+});
+
+test("decimalToWats converts whole-number and fractional amounts", () => {
+  assert.equal(decimalToWats("1"), 100_000_000n);
+  assert.equal(decimalToWats("0.3"), 30_000_000n);
+  assert.equal(decimalToWats("0.00000001"), 1n);
+  assert.equal(decimalToWats("0.01"), 1_000_000n);
+});
+
+test("decimalToWats normalizes equivalent representations", () => {
+  // "1.30" and "1.3" must produce the same wats — important so two prices
+  // that the seller writes differently can't disagree on the wire.
+  assert.equal(decimalToWats("1.30"), decimalToWats("1.3"));
+  assert.equal(decimalToWats("1.30000000"), decimalToWats("1.3"));
+});
+
+test("decimalToWats round-trips with watsToDecimal", () => {
+  for (const s of ["1", "0.3", "0.01", "0.00000001", "1000000.12345678"]) {
+    assert.equal(watsToDecimal(decimalToWats(s)), s);
+  }
+});
+
+test("decimalToWats rejects invalid input", () => {
+  assert.throws(() => decimalToWats(""), TypeError);
+  // @ts-expect-error — runtime check
+  assert.throws(() => decimalToWats(null), TypeError);
+  // @ts-expect-error
+  assert.throws(() => decimalToWats(0.01), TypeError);
+  assert.throws(() => decimalToWats("-1"), RangeError);
+  assert.throws(() => decimalToWats("+1"), RangeError);
+  assert.throws(() => decimalToWats(" 1"), RangeError);
+  assert.throws(() => decimalToWats("1 "), RangeError);
+  assert.throws(() => decimalToWats("0.123456789"), RangeError); // 9 fractional digits
+  assert.throws(() => decimalToWats("1e2"), RangeError);
+  assert.throws(() => decimalToWats("."), RangeError);
+  assert.throws(() => decimalToWats(".5"), RangeError);
+});
+
+test("decimalToWats rejects zero", () => {
+  assert.throws(() => decimalToWats("0"), RangeError);
+  assert.throws(() => decimalToWats("0.0"), RangeError);
+  assert.throws(() => decimalToWats("0.00000000"), RangeError);
 });
 
 function fakeFetch(handlers: Record<string, (init: RequestInit) => Response | Promise<Response>>): typeof fetch {

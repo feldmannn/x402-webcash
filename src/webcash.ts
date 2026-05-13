@@ -60,6 +60,39 @@ export function watsToDecimal(wats: bigint): string {
   return `${whole}.${fracStr}`;
 }
 
+const DECIMAL_RE = /^(\d+)(?:\.(\d{1,8}))?$/;
+
+/**
+ * Parse a decimal webcash amount ("0.01", "1", "1.30000000") to wats (bigint).
+ *
+ * Sellers configure prices in decimal; the wire protocol carries wats. This
+ * is the canonical conversion — do NOT use `Number(...) * 1e8`, which loses
+ * precision below ~7 decimal places.
+ *
+ * Throws on any input that isn't a non-empty positive decimal with at most
+ * 8 fractional digits. Zero is rejected (consistent with parseSecret).
+ */
+export function decimalToWats(amount: string): bigint {
+  if (typeof amount !== "string" || amount.length === 0) {
+    throw new TypeError(`decimalToWats: expected non-empty string, got ${typeof amount}`);
+  }
+  const m = DECIMAL_RE.exec(amount);
+  if (!m) {
+    throw new RangeError(
+      `decimalToWats: "${amount}" is not a valid decimal webcash amount ` +
+        `(expected e.g. "0.01" or "1.30", max 8 fractional digits, no sign, no whitespace).`,
+    );
+  }
+  const whole = m[1];
+  const frac = m[2] ?? "";
+  const padded = (frac + "00000000").slice(0, 8);
+  const wats = BigInt(whole) * 100_000_000n + BigInt(padded);
+  if (wats === 0n) {
+    throw new RangeError(`decimalToWats: amount must be > 0 (got "${amount}")`);
+  }
+  return wats;
+}
+
 export function secretFingerprint(secret: string): string {
   return createHash("sha256").update(secret).digest("hex");
 }

@@ -2,6 +2,7 @@ export * from "./types.js";
 export {
   DEFAULT_LEGALESE,
   KNOWN_NETWORKS,
+  decimalToWats,
   issuerHealth,
   newOutputSecret,
   parseSecret,
@@ -14,6 +15,7 @@ export { Facilitator, isAcceptableIssuerScheme } from "./facilitator.js";
 export type { FacilitatorOptions } from "./facilitator.js";
 export { paywall } from "./middleware.js";
 export type { PaywallOptions, WebcashOutput } from "./middleware.js";
+export { webcashSettler } from "./mcp-settler.js";
 // Client-side scheme handler (also exported via the `x402-webcash/client`
 // subpath for consumers that want to import only the client surface).
 export {
