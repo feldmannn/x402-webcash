@@ -26,7 +26,7 @@ Adding `webcash` as an x402 scheme means any x402-aware client gains the ability
 
 Early. Spec is v0 and unproposed.
 
-What's in place as of 0.5.3:
+What's in place as of 0.5.4:
 
 - **Issuer URL allowlist:** `FacilitatorOptions.issuerAllowlist` (or `WEBCASH_ISSUER_ALLOWLIST=url1,url2` env var). Canonical webcash.org issuers are always included. Any `extra.issuerUrl` outside the allowlist is rejected at verify with `invalid_network`.
 - **HTTPS enforcement:** facilitator, paywall middleware, and the client-side splitter all reject non-HTTPS issuer/facilitator URLs that are not loopback. Opt-out (`allowHttpIssuer` / `allowHttpFacilitator` / `WEBCASH_ALLOW_HTTP_ISSUER=1`) is reserved for test rigs.
@@ -150,6 +150,24 @@ requirements, are converted into non-retriable failures and logged to
 stderr with `[x402-webcash][CRITICAL]` so an operator can audit the
 facilitator. Mint failures map to `retriable: true` (the input was never
 sent to the issuer); all other failures map to `retriable: false`.
+
+## Operator security: the recovery log
+
+This library writes `[x402-webcash][CRITICAL] …` lines to **stderr** on every fund-loss-adjacent code path. These are the deliberate last-resort witness: without them, a transient disk error during persistence, an ambiguous network failure mid-split, or a malformed facilitator response would silently destroy funds.
+
+**Several of these lines contain webcash secrets in plaintext.** Anyone who reads the log line can spend them. Specifically:
+
+- `middleware.ts` → `persistence_failure secret=…` and `recovery_callback_also_failed secret=…` when the seller's `onSettled`/`onSettledRecovery` hooks throw.
+- `client/split.ts` → both `[required, change]` output secrets when an auto-split's network outcome is ambiguous.
+- `client/fetch.ts` → wallet-restoration failures after a 402 retry path errors.
+
+The `mcp-settler.ts` and integrity-gate paths log `transaction=…` and `amount` material only — not the secret itself — because the facilitator has already moved the funds by then.
+
+Operator responsibilities:
+
+- **Do NOT ship stderr from a webcash facilitator, paywalled server, or splitter-using client to third-party log aggregators** (Datadog, Loggly, Splunk Cloud, etc.) without redacting `secret=` and the full output-secret line. Treat that stream like a `.env` file.
+- **Provide `onSettledRecovery` callbacks** that write to a sink independent of your primary persistence (encrypted file on disk, secrets manager). If the recovery callback also fails, the secret is still in stderr — but a healthy operator should never need to grep for it.
+- **Search by `transaction=` first**, not `secret=`. The error responses returned to callers embed `transaction=<id>` so you can correlate the failed call with the recovery line without grepping for secret material in shared incident channels.
 
 ### Using with AI agents (MCP)
 

@@ -2,6 +2,16 @@
 
 All notable changes to `x402-webcash`. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semver but is still pre-1.0, so minor versions may include breaking changes until the spec is proposed upstream.
 
+## [0.5.4] — 2026-05-15
+
+### Added
+
+- README §"Operator security: the recovery log" — explicit warning that `[x402-webcash][CRITICAL]` stderr lines from `middleware.ts`, `client/split.ts`, and `client/fetch.ts` contain webcash secrets in plaintext. Operators MUST NOT ship that stream to third-party log aggregators without redacting `secret=`. The `mcp-settler.ts` and integrity-gate paths only log `transaction=` / amount material — secret-safe.
+
+### Changed
+
+- Dev-dep refresh: `typescript` 5.7→6.0, `tsx` 4.19→4.22, `@types/node` 22→24 LTS. `tsconfig.json` adds `"types": ["node"]` (TS 6 no longer auto-includes Node globals from `@types/node`). Runtime `express ^4.21.2` dependency unchanged (Express 5 major bump intentionally deferred).
+
 ## [0.5.3] — 2026-05-15
 
 ### Changed
@@ -59,6 +69,7 @@ All notable changes to `x402-webcash`. Format follows [Keep a Changelog](https:/
 - **Round 3 review fixes** — settlement integrity gate, fetch timeouts, defensive issuer URL parsing.
 - **Initial release** — x402 v2 scheme spec (`specs/scheme_webcash.md`), `Facilitator` with `/verify` `/settle` `/supported`, Express `paywall` middleware.
 
+[0.5.4]: https://github.com/feldmannn/x402-webcash/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/feldmannn/x402-webcash/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/feldmannn/x402-webcash/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/feldmannn/x402-webcash/compare/v0.5.0...v0.5.1
