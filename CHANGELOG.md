@@ -2,11 +2,20 @@
 
 All notable changes to `x402-webcash`. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semver but is still pre-1.0, so minor versions may include breaking changes until the spec is proposed upstream.
 
-## [0.5.2] — 2026-05-15
+## [0.5.3] — 2026-05-15
 
 ### Changed
 
-- Documentation-only release. README now covers the `webcashSettler` + `@feldmannn/x402-mcp` integration with a worked example, mentions `webcash-mcp`'s `pay_tool`, and adds CI + npm badges. First release with a `CHANGELOG.md` (shipped to npm via the `files` array). No runtime code changes.
+- Documentation update. README now covers the `webcashSettler` + `@feldmannn/x402-mcp` integration with a worked example (verified against the published `0.1.0` `.d.ts`), mentions `webcash-mcp`'s `pay_tool`, and adds CI + npm badges. First release with a `CHANGELOG.md` (shipped to npm via the `files` array).
+- `build` script now cleans `dist/` first, so stale artifacts from earlier builds no longer bloat the npm tarball. The published 0.5.3 tarball is **53 files / 45 kB** (down from 137 / 75 kB in 0.5.1).
+
+### Notes
+
+- `v0.5.2` exists as a git tag but was never published to npm — the same doc improvements ship in 0.5.3 along with the build cleanup.
+
+## [0.5.2] — git-only, never published to npm
+
+- Tag exists on GitHub but the build still included stale `dist/tests/*` and `dist/examples/*` from a pre-`tsconfig.build.json` layout. Superseded by 0.5.3, which carries the same documentation plus a `prebuild clean` step. Do not depend on this version.
 
 ## [0.5.1] — 2026-05-13
 
@@ -50,6 +59,7 @@ All notable changes to `x402-webcash`. Format follows [Keep a Changelog](https:/
 - **Round 3 review fixes** — settlement integrity gate, fetch timeouts, defensive issuer URL parsing.
 - **Initial release** — x402 v2 scheme spec (`specs/scheme_webcash.md`), `Facilitator` with `/verify` `/settle` `/supported`, Express `paywall` middleware.
 
+[0.5.3]: https://github.com/feldmannn/x402-webcash/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/feldmannn/x402-webcash/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/feldmannn/x402-webcash/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/feldmannn/x402-webcash/releases/tag/v0.5.0

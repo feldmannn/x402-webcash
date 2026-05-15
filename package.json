@@ -1,6 +1,6 @@
 {
   "name": "x402-webcash",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "x402 payment scheme for webcash bearer e-cash — facilitator, middleware, and a transport-agnostic client that auto-settles HTTP 402 challenges from a local wallet.",
   "license": "MIT",
   "author": "Nate Feldmann",
@@ -42,7 +42,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "prepare": "npm run build",
     "facilitator": "tsx src/server.ts",
     "example": "tsx examples/express-server.ts",
