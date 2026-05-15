@@ -1,6 +1,6 @@
 # Scheme: `webcash`
 
-**Status:** Draft v0 (not yet proposed upstream — see reference implementation 0.4.0 status in the repo README for what is implemented vs reserved)
+**Status:** Draft v0 (not yet proposed upstream — see reference implementation 0.5.2 status in the repo README for what is implemented vs reserved)
 **x402 protocol version:** 2
 
 ## Summary

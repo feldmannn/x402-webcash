@@ -1,5 +1,8 @@
 # x402-webcash
 
+[![ci](https://github.com/feldmannn/x402-webcash/actions/workflows/ci.yml/badge.svg)](https://github.com/feldmannn/x402-webcash/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/x402-webcash.svg)](https://www.npmjs.com/package/x402-webcash)
+
 An [x402](https://github.com/coinbase/x402) payment scheme for [webcash](https://webcash.org) — bearer-token e-cash settled by an atomic-replacement issuer.
 
 This repo contains:
@@ -7,6 +10,7 @@ This repo contains:
 - **[`specs/scheme_webcash.md`](specs/scheme_webcash.md)** — the formal scheme specification, written against the x402 v2 scheme template. Intended to be proposed upstream to `coinbase/x402`.
 - **`src/`** — a TypeScript reference facilitator implementing `POST /verify`, `POST /settle`, and `GET /supported` for the `webcash` scheme, plus an Express middleware and a client-side scheme handler.
 - **`src/client/`** — a transport-agnostic client (also exported as `x402-webcash/client`): `FileWallet`, `buildWebcashHeader`, and a `wrapFetchWithWebcash` fetch adapter that auto-settles 402s.
+- **`src/mcp-settler.ts`** — `webcashSettler(facilitator)`, an adapter that plugs this library's `Facilitator` into [`@feldmannn/x402-mcp`](https://github.com/feldmannn/x402-mcp) so MCP tools can be paywalled in webcash.
 - **`examples/express-server.ts`** — a tiny Express resource server that paywalls an endpoint using this facilitator.
 - **`examples/fetch-client.ts`** — a client that spends a webcash secret to call the paywalled endpoint above.
 
@@ -22,13 +26,14 @@ Adding `webcash` as an x402 scheme means any x402-aware client gains the ability
 
 Early. Spec is v0 and unproposed.
 
-What's in place as of 0.4.0:
+What's in place as of 0.5.2:
 
 - **Issuer URL allowlist:** `FacilitatorOptions.issuerAllowlist` (or `WEBCASH_ISSUER_ALLOWLIST=url1,url2` env var). Canonical webcash.org issuers are always included. Any `extra.issuerUrl` outside the allowlist is rejected at verify with `invalid_network`.
 - **HTTPS enforcement:** facilitator, paywall middleware, and the client-side splitter all reject non-HTTPS issuer/facilitator URLs that are not loopback. Opt-out (`allowHttpIssuer` / `allowHttpFacilitator` / `WEBCASH_ALLOW_HTTP_ISSUER=1`) is reserved for test rigs.
 - **Concurrency-safe FileWallet:** in-process mutex serializes wallet operations so concurrent `takeExact` calls cannot double-spend or clobber writes. Not safe across processes — use SQLite/keychain-backed wallets for multi-process deployments.
 - **Pre-flight journal hook:** `wrapFetchWithWebcash` accepts a `journal` callback that fires after a secret is taken from the wallet but before the request is sent, so a process crash mid-request can be reconciled.
 - **Full failure-mode coverage** for: settlement integrity (server-side), ambiguous response (client-side), split rejection vs split ambiguity, persistence-failure recovery hooks, and `[x402-webcash][CRITICAL]` stderr breadcrumbs on every fund-loss path.
+- **MCP bridge:** `webcashSettler(facilitator)` adapts the facilitator to [`@feldmannn/x402-mcp`](https://github.com/feldmannn/x402-mcp)'s `Settler` interface, including an amount-integrity gate that rejects facilitator-returned secrets whose embedded amount does not match the buyer's requirements.
 
 Still open / future work:
 
@@ -102,13 +107,59 @@ secrets are logged to stderr with the `[x402-webcash][CRITICAL]` marker
 so an operator can recover them. See `splitToMatch` for the full
 failure-mode contract.
 
+### Paywalling MCP tools (`webcashSettler`)
+
+To accept webcash for your own MCP tools, pair this library's facilitator
+with [`@feldmannn/x402-mcp`](https://github.com/feldmannn/x402-mcp):
+
+```typescript
+import { Facilitator, webcashSettler, decimalToWats, type WebcashOutput } from "x402-webcash";
+import { createPaywall } from "@feldmannn/x402-mcp";
+
+const facilitator = new Facilitator({
+  issuerAllowlist: ["https://webcash.org"],
+});
+
+const paywall = createPaywall<WebcashOutput>({
+  settler: webcashSettler(facilitator),
+  scheme: "webcash",
+  asset: "webcash",
+  network: "webcash:mainnet",
+  payTo: "https://webcash.org",
+  onSettled: async (output) => {
+    // Persist `output.secret` to your wallet — or you lose the funds.
+  },
+});
+
+// Then wrap any MCP tool handler:
+server.registerTool("premium_search", schema, paywall.gate(
+  {
+    amount: decimalToWats("0.001").toString(), // 0.001 webcash in wats (x402 v2 is string)
+    resourceUrl: "mcp://your-server/premium_search",
+  },
+  async (args, extra) => {
+    return { content: [{ type: "text", text: "result" }] };
+  },
+));
+```
+
+`webcashSettler` enforces the same integrity gates as the Express
+middleware: success responses without a parseable output secret, or with
+an output secret whose embedded amount disagrees with the buyer's
+requirements, are converted into non-retriable failures and logged to
+stderr with `[x402-webcash][CRITICAL]` so an operator can audit the
+facilitator. Mint failures map to `retriable: true` (the input was never
+sent to the issuer); all other failures map to `retriable: false`.
+
 ### Using with AI agents (MCP)
 
-If you want AI agents to be able to pay webcash-protected URLs over MCP,
-use [**webcash-mcp**](https://github.com/feldmannn/webcash-mcp) — a
-general-purpose stdio MCP server built on top of this library. It exposes
-`pay_fetch`, `wallet_balance`, `wallet_import`, and `wallet_status` tools
-that any MCP client (Claude Desktop, etc.) can call.
+If you want AI agents to be able to pay webcash-protected URLs and MCP
+tools, use [**webcash-mcp**](https://github.com/feldmannn/webcash-mcp) —
+a general-purpose stdio MCP server built on top of this library. It
+exposes `pay_fetch` (HTTP-402), `pay_tool` (MCP-402, via
+`@feldmannn/x402-mcp`), `wallet_balance`, `wallet_import`, and
+`wallet_status` tools that any MCP client (Claude Desktop, etc.) can
+call.
 
 ## License
 

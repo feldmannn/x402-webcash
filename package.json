@@ -1,6 +1,6 @@
 {
   "name": "x402-webcash",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "x402 payment scheme for webcash bearer e-cash — facilitator, middleware, and a transport-agnostic client that auto-settles HTTP 402 challenges from a local wallet.",
   "license": "MIT",
   "author": "Nate Feldmann",
@@ -38,6 +38,7 @@
     "dist",
     "specs",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
