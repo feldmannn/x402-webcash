@@ -24,24 +24,22 @@ Adding `webcash` as an x402 scheme means any x402-aware client gains the ability
 
 ## Status
 
-Early. Spec is v0 and unproposed.
+**1.0** — feature-complete reference implementation, spec ready for upstream proposal to `coinbase/x402`. 122 tests covering every documented failure mode.
 
-What's in place as of 0.5.4:
+What's in 1.0:
 
-- **Issuer URL allowlist:** `FacilitatorOptions.issuerAllowlist` (or `WEBCASH_ISSUER_ALLOWLIST=url1,url2` env var). Canonical webcash.org issuers are always included. Any `extra.issuerUrl` outside the allowlist is rejected at verify with `invalid_network`.
-- **HTTPS enforcement:** facilitator, paywall middleware, and the client-side splitter all reject non-HTTPS issuer/facilitator URLs that are not loopback. Opt-out (`allowHttpIssuer` / `allowHttpFacilitator` / `WEBCASH_ALLOW_HTTP_ISSUER=1`) is reserved for test rigs.
-- **Concurrency-safe FileWallet:** in-process mutex serializes wallet operations so concurrent `takeExact` calls cannot double-spend or clobber writes. Not safe across processes — use SQLite/keychain-backed wallets for multi-process deployments.
-- **Pre-flight journal hook:** `wrapFetchWithWebcash` accepts a `journal` callback that fires after a secret is taken from the wallet but before the request is sent, so a process crash mid-request can be reconciled.
-- **Full failure-mode coverage** for: settlement integrity (server-side), ambiguous response (client-side), split rejection vs split ambiguity, persistence-failure recovery hooks, and `[x402-webcash][CRITICAL]` stderr breadcrumbs on every fund-loss path.
-- **MCP bridge:** `webcashSettler(facilitator)` adapts the facilitator to [`@feldmannn/x402-mcp`](https://github.com/feldmannn/x402-mcp)'s `Settler` interface, including an amount-integrity gate that rejects facilitator-returned secrets whose embedded amount does not match the buyer's requirements.
+- **Facilitator + Express paywall + transport-agnostic client.** `Facilitator.verify` / `Facilitator.settle` / `GET /supported` for x402 v2; Express `paywall` middleware; `FileWallet` + `buildWebcashHeader` + `wrapFetchWithWebcash` on the client side.
+- **`paywallLocal(facilitator, opts)`** — in-process facilitator paywall. No HTTP hop, no third-party trust boundary; combined with a caller-supplied `mintOutputSecret`, the resource server controls every step of settlement.
+- **SPKI certificate pinning.** `pinnedSpkiHashes` is accepted on `Facilitator`, `paywall`, `splitToMatch`, and `wrapFetchWithWebcash`'s `autoSplit`. Pinning is additive (default CA + hostname validation runs first); a mismatch fails at TLS handshake before any bearer secret is transmitted. RFC 7469 pin format. `createPinnedFetch({ pinnedSpkiHashes })` is exported for callers using custom transports.
+- **Recipient binding (buyer-derived outputs).** The 402 challenge can advertise an X25519 public key + nonce; the buyer derives the output secret via ECDH+HKDF; the facilitator is contractually constrained to use exactly that secret in `/replace`; the resource server verifies the returned secret against its private key post-settlement. Closes the facilitator-substitution attack on remote facilitator deployments. See `specs/scheme_webcash.md` "Recipient binding".
+- **Issuer URL allowlist.** `FacilitatorOptions.issuerAllowlist` (or `WEBCASH_ISSUER_ALLOWLIST=url1,url2`). Canonical webcash.org issuers are always included; `extra.issuerUrl` outside the allowlist is rejected at verify with `invalid_network`.
+- **HTTPS enforcement.** Facilitator, paywall middleware, and the client-side splitter all reject non-HTTPS URLs that are not loopback. Opt-out (`allowHttpIssuer` / `allowHttpFacilitator` / `WEBCASH_ALLOW_HTTP_ISSUER=1`) is reserved for test rigs.
+- **Concurrency-safe FileWallet.** In-process mutex serializes wallet operations so concurrent `takeExact` calls cannot double-spend or clobber writes. Not safe across processes — use SQLite/keychain-backed wallets for multi-process deployments.
+- **Pre-flight journal hook.** `wrapFetchWithWebcash` accepts a `journal` callback that fires after a secret is taken from the wallet but before the request is sent, so a process crash mid-request can be reconciled.
+- **Full failure-mode coverage** for: settlement integrity (server-side), ambiguous response (client-side), split rejection vs split ambiguity, persistence-failure recovery hooks, binding-substitution detection, and `[x402-webcash][CRITICAL]` stderr breadcrumbs on every fund-loss path.
+- **MCP bridge.** `webcashSettler(facilitator)` adapts the facilitator to [`@feldmannn/x402-mcp`](https://github.com/feldmannn/x402-mcp)'s `Settler` interface.
 
-Still open / future work:
-
-- TLS certificate / SPKI pinning beyond simple HTTPS enforcement (requires custom dispatcher; out of scope for v0.x).
-- `extra.recipientPublicHash` is reserved in the spec but the underlying mechanism for binding an output secret to a recipient hash needs more design — without a protocol-level binding, the facilitator can substitute its own output. The practical mitigation today is "the facilitator is part of your trusted set" or "self-host the facilitator inside your resource server."
-- No security audit by a third party. Production deployments should review the codebase themselves until that lands.
-
-See `specs/scheme_webcash.md` for the spec-level discussion of these.
+See `specs/scheme_webcash.md` for the full protocol and security model, including the recipient-binding race-window analysis. See [`SECURITY.md`](SECURITY.md) for the trust model and how to report vulnerabilities.
 
 ## Quick start
 
@@ -151,6 +149,102 @@ stderr with `[x402-webcash][CRITICAL]` so an operator can audit the
 facilitator. Mint failures map to `retriable: true` (the input was never
 sent to the issuer); all other failures map to `retriable: false`.
 
+## Server-side deployment models
+
+There are three ways to paywall a resource with this library, in order of increasing facilitator trust required:
+
+### 1. In-process facilitator (strongest)
+
+The resource server runs the facilitator itself. No third party is in the trust set. The resource server controls the output secret directly via `mintOutputSecret`.
+
+```typescript
+import { Facilitator, paywallLocal } from "x402-webcash";
+import express from "express";
+
+const facilitator = new Facilitator({
+  issuerAllowlist: ["https://webcash.org"],
+  mintOutputSecret: (amountDecimal) => myWallet.newSecret(amountDecimal),
+});
+
+const app = express();
+app.get(
+  "/premium",
+  paywallLocal(facilitator, {
+    amountWats: 30_000_000n,
+    onSettled: (output) => myWallet.put(output.secret),
+  }),
+  (_req, res) => res.json({ ok: true }),
+);
+```
+
+### 2. Remote facilitator with recipient binding (middle ground)
+
+A separate facilitator service settles for you, but it cannot substitute its own output secret — the buyer derives one via ECDH against your X25519 public key, and you verify the returned secret against your private key. The facilitator briefly knows the secret (it has to, to call `/replace`); the residual risk is a race to spend in the gap between settlement and your refresh. Spend immediately in `onSettled` to minimize the window.
+
+```typescript
+import { paywall, RecipientKey } from "x402-webcash";
+
+const recipientKey = RecipientKey.generate(); // or RecipientKey.fromJwk(persistedJwk)
+
+app.get(
+  "/premium",
+  paywall({
+    amountWats: 30_000_000n,
+    facilitatorUrl: "https://facilitator.example.com",
+    pinnedSpkiHashes: [/* current pin */, /* backup pin */],
+    recipientKey,
+    onSettled: async (output) => {
+      // Refresh immediately to close the race window.
+      await myWallet.refreshAndPut(output.secret);
+    },
+  }),
+  (_req, res) => res.json({ ok: true }),
+);
+```
+
+### 3. Remote facilitator without binding (trust the operator)
+
+The classic deployment. The facilitator chooses the output secret; you trust it as part of your security perimeter. Useful when you have an operational relationship with the facilitator operator (e.g., self-hosted on the same VPC, or run by an org you trust).
+
+```typescript
+import { paywall } from "x402-webcash";
+
+app.get(
+  "/premium",
+  paywall({
+    amountWats: 30_000_000n,
+    facilitatorUrl: "https://facilitator.example.com",
+    pinnedSpkiHashes: [/* current pin */, /* backup pin */],
+    onSettled: (output) => myWallet.put(output.secret),
+  }),
+  (_req, res) => res.json({ ok: true }),
+);
+```
+
+## SPKI certificate pinning
+
+Plain HTTPS trusts the public CA system. To defend against a CA-mis-issued cert on the facilitator↔issuer or paywall↔facilitator channel, configure SPKI pins on every HTTPS leg:
+
+```typescript
+new Facilitator({
+  pinnedSpkiHashes: [
+    "NWny299lvjd0rPs5z5gb8Vq5tyjlt6vn5C4N6MF4Ltg=", // current
+    "AAAAAAAAbackupAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",  // backup
+  ],
+});
+```
+
+Compute the pin for an HTTPS endpoint:
+
+```bash
+openssl s_client -connect webcash.org:443 < /dev/null 2>/dev/null \
+  | openssl x509 -pubkey -noout \
+  | openssl pkey -pubin -outform DER \
+  | openssl dgst -sha256 -binary | base64
+```
+
+Configure at least two pins (current + backup) so a planned key rotation is not an outage. Pinning is **additive** to default CA validation — it strengthens trust, never weakens it. A mismatch fails at TLS handshake with `PinMismatchError` before any bearer secret is transmitted.
+
 ## Operator security: the recovery log
 
 This library writes `[x402-webcash][CRITICAL] …` lines to **stderr** on every fund-loss-adjacent code path. These are the deliberate last-resort witness: without them, a transient disk error during persistence, an ambiguous network failure mid-split, or a malformed facilitator response would silently destroy funds.
@@ -169,7 +263,7 @@ Operator responsibilities:
 - **Provide `onSettledRecovery` callbacks** that write to a sink independent of your primary persistence (encrypted file on disk, secrets manager). If the recovery callback also fails, the secret is still in stderr — but a healthy operator should never need to grep for it.
 - **Search by `transaction=` first**, not `secret=`. The error responses returned to callers embed `transaction=<id>` so you can correlate the failed call with the recovery line without grepping for secret material in shared incident channels.
 
-### Using with AI agents (MCP)
+## Using with AI agents (MCP)
 
 If you want AI agents to be able to pay webcash-protected URLs and MCP
 tools, use [**webcash-mcp**](https://github.com/feldmannn/webcash-mcp) —

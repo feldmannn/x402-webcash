@@ -20,6 +20,8 @@ import {
   secretFingerprint,
   watsToDecimal,
 } from "./webcash.js";
+import { createPinnedFetch } from "./pinning.js";
+import { recipientPublicHash } from "./recipient.js";
 
 export type FacilitatorOptions = {
   issuerAllowlist?: string[];
@@ -49,6 +51,21 @@ export type FacilitatorOptions = {
    * stolen by any on-path observer.
    */
   allowHttpIssuer?: boolean;
+  /**
+   * SPKI pins (base64(SHA-256(SPKI DER))) for the issuer TLS endpoint(s).
+   * When set, every issuer call performs the standard CA/hostname check AND
+   * additionally requires the server's public key hash to match one of the
+   * pins. Mismatches surface as a network error with `PinMismatchError` in
+   * the cause chain and are reported to the caller as `issuer_unreachable`
+   * (the secret was never transmitted to a mis-issued endpoint).
+   *
+   * Provide at least two pins (current + backup) so key rotation is not an
+   * outage. See `src/pinning.ts` for how to compute pin values.
+   *
+   * Pinning is additive: it strengthens trust, never weakens it. Cannot be
+   * combined with a caller-supplied `fetchImpl` — pass one or the other.
+   */
+  pinnedSpkiHashes?: readonly string[];
 };
 
 type Validated = {
@@ -84,7 +101,17 @@ export class Facilitator {
       }
     }
     this.allowlist = new Set(candidates);
-    this.fetchImpl = opts.fetchImpl ?? fetch;
+    if (opts.pinnedSpkiHashes?.length && opts.fetchImpl) {
+      throw new Error(
+        `[x402-webcash] Facilitator: pinnedSpkiHashes and fetchImpl are ` +
+          `mutually exclusive — pinning operates at the TLS dispatcher layer, ` +
+          `so a caller-supplied fetchImpl would either bypass it (silently ` +
+          `unsafe) or double-wrap it. Pick one.`,
+      );
+    }
+    this.fetchImpl = opts.pinnedSpkiHashes?.length
+      ? createPinnedFetch({ pinnedSpkiHashes: opts.pinnedSpkiHashes })
+      : (opts.fetchImpl ?? fetch);
     this.mintOutputSecret = opts.mintOutputSecret ?? newOutputSecret;
     this.healthCacheTtlMs = opts.healthCacheTtlMs ?? 5000;
     this.legalese = opts.legalese ?? { ...DEFAULT_LEGALESE };
@@ -125,20 +152,61 @@ export class Facilitator {
       };
     }
 
-    // Mint the output secret BEFORE calling /replace so a throw here cannot
-    // leave the input spent without a recoverable output. The caller-supplied
-    // mintOutputSecret may throw (wallet I/O, exhaustion, etc.); surface that
-    // as unexpected_settle_error rather than letting it crash the handler.
+    // Resolve the output secret. Two paths:
+    //
+    //   (a) Recipient-binding ON  — payload.accepted.extra.recipientPublicHash
+    //       is set. The buyer has supplied `payload.outputSecret`; we MUST
+    //       use it (we cannot mint our own) and we MUST verify it hashes to
+    //       the committed value. This is the only way the resource server
+    //       can be sure we did not substitute a secret we control.
+    //
+    //   (b) Recipient-binding OFF — we mint as before.
     let output: string;
-    try {
-      output = this.mintOutputSecret(watsToDecimal(v.parsed.wats));
-    } catch (e) {
+    const bindingResult = resolveBoundOutput(req);
+    if (bindingResult.kind === "invalid") {
       return {
         success: false,
-        errorReason: `unexpected_settle_error: mint_output_failed: ${(e as Error).message}`,
+        errorReason: bindingResult.reason,
         transaction: "",
         network,
       };
+    }
+    if (bindingResult.kind === "bound") {
+      // Buyer-supplied; verify amount matches the input so we don't settle
+      // a smaller-amount secret than the buyer is being charged for.
+      const parsedOutput = parseSecret(bindingResult.outputSecret);
+      if (!parsedOutput) {
+        return {
+          success: false,
+          errorReason: "invalid_payload: outputSecret does not parse as a webcash secret",
+          transaction: "",
+          network,
+        };
+      }
+      if (parsedOutput.wats !== v.parsed.wats) {
+        return {
+          success: false,
+          errorReason: "invalid_payload: outputSecret amount does not match input amount",
+          transaction: "",
+          network,
+        };
+      }
+      output = bindingResult.outputSecret;
+    } else {
+      // Mint the output secret BEFORE calling /replace so a throw here cannot
+      // leave the input spent without a recoverable output. The caller-supplied
+      // mintOutputSecret may throw (wallet I/O, exhaustion, etc.); surface that
+      // as unexpected_settle_error rather than letting it crash the handler.
+      try {
+        output = this.mintOutputSecret(watsToDecimal(v.parsed.wats));
+      } catch (e) {
+        return {
+          success: false,
+          errorReason: `unexpected_settle_error: mint_output_failed: ${(e as Error).message}`,
+          transaction: "",
+          network,
+        };
+      }
     }
 
     // Skip the explicit health check — the /replace call below is itself the
@@ -199,6 +267,22 @@ export class Facilitator {
     ) {
       return { ok: false, reason: "invalid_payload" };
     }
+    // Recipient-binding echo: if the server published recipientPublicKey or
+    // recipientNonce in its requirements, the buyer MUST echo them unchanged.
+    // Buyers MAY add fields (e.g., recipientPublicHash) but MUST NOT swap the
+    // server's key or nonce — that would let them point the derivation at a
+    // pubkey they control. The resource server's post-settlement check
+    // catches this anyway, but failing here gives a cleaner error.
+    const reqsExtra = (reqs.extra ?? {}) as Record<string, unknown>;
+    const acceptedExtra = (accepted.extra ?? {}) as Record<string, unknown>;
+    for (const field of ["recipientPublicKey", "recipientNonce"] as const) {
+      if (reqsExtra[field] !== undefined && acceptedExtra[field] !== reqsExtra[field]) {
+        return {
+          ok: false,
+          reason: `invalid_payload: accepted.extra.${field} does not echo paymentRequirements.extra.${field}`,
+        };
+      }
+    }
 
     const payload = req.paymentPayload.payload as WebcashPayload | undefined;
     if (!payload || typeof payload.secret !== "string") {
@@ -243,6 +327,52 @@ export class Facilitator {
     this.healthCache.set(url, { ok: result.ok, expires: now + this.healthCacheTtlMs });
     return result.ok;
   }
+}
+
+type BoundOutputResolution =
+  | { kind: "none" }
+  | { kind: "bound"; outputSecret: string }
+  | { kind: "invalid"; reason: string };
+
+/**
+ * If the buyer's echoed `accepted.extra.recipientPublicHash` is set, the
+ * facilitator MUST use the buyer-supplied output secret (not mint its own)
+ * and MUST verify it hashes to the committed value. See specs/scheme_webcash.md
+ * "Recipient binding" and src/recipient.ts for the full protocol.
+ */
+function resolveBoundOutput(req: FacilitatorRequest): BoundOutputResolution {
+  const acceptedExtra = (req.paymentPayload.accepted.extra ?? {}) as Record<string, unknown>;
+  const claimedHash = acceptedExtra["recipientPublicHash"];
+  if (claimedHash === undefined) return { kind: "none" };
+  if (typeof claimedHash !== "string" || claimedHash.length === 0) {
+    return {
+      kind: "invalid",
+      reason: "invalid_payload: recipientPublicHash must be a non-empty string",
+    };
+  }
+  const payload = req.paymentPayload.payload as { outputSecret?: unknown };
+  const outputSecret = payload.outputSecret;
+  if (typeof outputSecret !== "string" || outputSecret.length === 0) {
+    return {
+      kind: "invalid",
+      reason: "invalid_payload: recipientPublicHash set but payload.outputSecret is missing",
+    };
+  }
+  const actualHash = recipientPublicHash(outputSecret);
+  // Constant-time string compare via byte XOR — both values are public
+  // (the hash is in the request), so this is belt-and-suspenders, but
+  // costs nothing.
+  if (actualHash.length !== claimedHash.length) {
+    return { kind: "invalid", reason: "invalid_payload: recipientPublicHash mismatch" };
+  }
+  let diff = 0;
+  for (let i = 0; i < actualHash.length; i++) {
+    diff |= actualHash.charCodeAt(i) ^ claimedHash.charCodeAt(i);
+  }
+  if (diff !== 0) {
+    return { kind: "invalid", reason: "invalid_payload: recipientPublicHash mismatch" };
+  }
+  return { kind: "bound", outputSecret };
 }
 
 function mapIssuerReason(reason: string): string {

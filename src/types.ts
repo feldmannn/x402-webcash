@@ -26,7 +26,24 @@ export type PaymentRequired = {
 };
 
 export type WebcashPayload = {
+  /** The bearer secret the buyer is paying with. Required. */
   secret: string;
+  /**
+   * Optional buyer-supplied output secret. When `paymentRequirements.extra
+   * .recipientPublicHash` is set, this field is REQUIRED and the facilitator
+   * MUST use it as the output of /replace (instead of minting a new one).
+   * The facilitator MUST also verify sha256(outputSecret_bytes_utf8) ==
+   * recipientPublicHash and reject the request otherwise.
+   *
+   * See specs/scheme_webcash.md "Recipient binding" for the full protocol.
+   */
+  outputSecret?: string;
+  /**
+   * Buyer's ephemeral X25519 public key (raw, base64), used by the recipient
+   * to re-derive and verify the output secret post-settlement. Required when
+   * `outputSecret` is set in a recipient-binding flow.
+   */
+  buyerPublicKey?: string;
 };
 
 export type PaymentPayload<P = unknown> = {

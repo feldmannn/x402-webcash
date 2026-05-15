@@ -19,6 +19,7 @@
 //     CRITICAL-logged so it can be manually recovered.
 
 import { isAcceptableIssuerScheme } from "../facilitator.js";
+import { createPinnedFetch } from "../pinning.js";
 import { DEFAULT_LEGALESE, DEFAULT_ISSUER_TIMEOUT_MS, newOutputSecret, parseSecret, replaceSecret, watsToDecimal } from "../webcash.js";
 import type { Wallet } from "./wallet.js";
 
@@ -35,6 +36,14 @@ export type SplitOptions = {
    * means any on-path observer can steal it. Test rigs only.
    */
   allowHttpIssuer?: boolean;
+  /**
+   * SPKI pins for the issuer's TLS cert. When set, the client's split call
+   * to `${issuerUrl}/api/v1/replace` performs the standard CA/hostname check
+   * AND requires the server's SPKI hash to match one of these pins. A
+   * mismatch fails at TLS handshake with `PinMismatchError` BEFORE the
+   * input secret is transmitted. Mutually exclusive with `fetchImpl`.
+   */
+  pinnedSpkiHashes?: readonly string[];
 };
 
 export class InsecureIssuerError extends Error {
@@ -115,6 +124,15 @@ export async function splitToMatch(
   if (!isAcceptableIssuerScheme(opts.issuerUrl, opts.allowHttpIssuer ?? false)) {
     throw new InsecureIssuerError(opts.issuerUrl);
   }
+  if (opts.pinnedSpkiHashes?.length && opts.fetchImpl) {
+    throw new Error(
+      `[x402-webcash] splitToMatch: pinnedSpkiHashes and fetchImpl are ` +
+        `mutually exclusive — pinning operates at the TLS dispatcher layer.`,
+    );
+  }
+  const fetchForIssuer = opts.pinnedSpkiHashes?.length
+    ? createPinnedFetch({ pinnedSpkiHashes: opts.pinnedSpkiHashes })
+    : (opts.fetchImpl ?? fetch);
 
   const candidates = await wallet.list();
   let bestSecret: string | null = null;
@@ -153,7 +171,7 @@ export async function splitToMatch(
     opts.issuerUrl,
     bestSecret,
     [requiredOutput, changeOutput],
-    opts.fetchImpl ?? fetch,
+    fetchForIssuer,
     opts.legalese ?? DEFAULT_LEGALESE,
     opts.timeoutMs ?? DEFAULT_ISSUER_TIMEOUT_MS,
   );

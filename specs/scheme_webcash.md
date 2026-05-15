@@ -1,6 +1,6 @@
 # Scheme: `webcash`
 
-**Status:** Draft v0 (not yet proposed upstream — see reference implementation 0.5.3 status in the repo README for what is implemented vs reserved)
+**Status:** v1 — feature-complete reference implementation; ready for upstream proposal to `coinbase/x402`.
 **x402 protocol version:** 2
 
 ## Summary
@@ -36,8 +36,10 @@ Custom issuers (forks or self-hosted) MAY override the default issuer URL via `e
 | `asset`             | `"webcash"`                                                                                        |
 | `payTo`             | Issuer URL where settlement will occur (e.g., `"https://webcash.org"`)                             |
 | `maxTimeoutSeconds` | Standard x402 field; SHOULD be at least the issuer round-trip time (typically 30–60s is generous) |
-| `extra.issuerUrl`   | Optional override of the default issuer for the given `network`                                    |
-| `extra.recipientPublicHash` | Optional pre-committed hash the resource server expects in the replacement output       |
+| `extra.issuerUrl`           | Optional override of the default issuer for the given `network`                                    |
+| `extra.recipientPublicKey`  | Optional. Base64-encoded raw X25519 public key the resource server uses for recipient binding; see "Recipient binding" below |
+| `extra.recipientNonce`      | Required if `recipientPublicKey` is set. Per-challenge fresh nonce (base64url, ≥16 bytes recommended) |
+| `extra.recipientPublicHash` | (Set by buyer in `accepted.extra`, not by server.) `base64(SHA-256(outputSecret))` precommitment; binds the facilitator to a specific output secret |
 
 The `payTo` URL MUST match the issuer implied by `network` unless `extra.issuerUrl` is set, in which case `payTo` MUST equal `extra.issuerUrl`.
 
@@ -71,9 +73,11 @@ The `payTo` URL MUST match the issuer implied by `network` unless `extra.issuerU
 
 The `X-PAYMENT` header carries a base64-encoded `PaymentPayload` JSON object (per the x402 v2 core specification). The scheme-specific `payload` field for `webcash` contains:
 
-| Field    | Type     | Required | Description                                                       |
-| -------- | -------- | -------- | ----------------------------------------------------------------- |
-| `secret` | `string` | Required | Bearer secret in `e<amount>:secret:<hex>` form                    |
+| Field             | Type     | Required                       | Description                                                                                                                                                                  |
+| ----------------- | -------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `secret`          | `string` | Required                       | Bearer secret in `e<amount>:secret:<hex>` form                                                                                                                               |
+| `outputSecret`    | `string` | Required when `accepted.extra.recipientPublicHash` is set; otherwise absent | The output secret the facilitator MUST use in `/replace` (instead of minting one). See "Recipient binding"                                              |
+| `buyerPublicKey` | `string` | Required when `outputSecret` is set | Base64-encoded raw X25519 public key the resource server uses to re-derive and verify `outputSecret` post-settlement                                                  |
 
 ### Example `PaymentPayload`
 
@@ -188,6 +192,89 @@ On a successful settlement the facilitator MUST return the bearer secret that no
 
 **A `success: true` response without `extensions.webcashOutput` (or with a malformed one) is a settlement-integrity failure.** The facilitator either lost or stole the new bearer secret. Resource servers MUST treat this as a fatal server-side error: do NOT serve the resource, return HTTP 500 (NOT 402), and log the transaction id to a recovery channel. Returning 402 invites a client retry that cannot succeed because the input secret is already spent at the issuer.
 
+## Recipient binding
+
+The baseline `webcash` flow lets the facilitator choose the output secret on `/replace`. A malicious or compromised facilitator can therefore substitute a secret it controls and pocket the funds. Two mitigations close this hole:
+
+- **In-process facilitator.** The resource server hosts the facilitator itself (no third party in the trust set). The resource server controls `mintOutputSecret` directly. This is the strongest model and is supported via the `paywallLocal(facilitator, opts)` helper in the reference implementation.
+- **Recipient binding.** A remote facilitator can be cryptographically constrained to use a specific output secret derived by the buyer from an ECDH key exchange with the resource server. The facilitator never gets to choose the output; if it substitutes, the resource server's post-settlement verification detects the substitution.
+
+The rest of this section describes the binding protocol.
+
+### Protocol
+
+When the resource server wants to use a remote facilitator under binding:
+
+1. **Server publishes pubkey + nonce in 402.** The resource server generates (or reuses) an X25519 keypair and includes its public key and a fresh per-challenge nonce in `paymentRequirements.extra`:
+
+   ```json
+   "extra": {
+     "recipientPublicKey": "<base64 raw X25519 pubkey, 32 bytes>",
+     "recipientNonce":     "<base64url nonce, ≥16 bytes>"
+   }
+   ```
+
+2. **Buyer derives a bound output secret.** The buyer generates an ephemeral X25519 keypair, computes the ECDH shared secret with `recipientPublicKey`, then derives the output secret hex via HKDF-SHA256:
+
+   ```
+   shared      = ECDH(buyer_priv, server_pub)
+   salt        = recipientNonce       (UTF-8 bytes)
+   info        = "x402-webcash:v1:" + recipientNonce + ":" + amountDecimal
+   output_hex  = HKDF-SHA256(shared, salt, info, L=32)
+   outputSecret = "e" + amountDecimal + ":secret:" + hex(output_hex)
+   ```
+
+   The HKDF parameters are exact and normative — both buyer and recipient MUST use the same byte-for-byte construction or verification will fail.
+
+3. **Buyer includes the binding fields in the payment.**
+
+   ```json
+   "accepted": {
+     ...,
+     "extra": {
+       "recipientPublicKey": "<echoed>",
+       "recipientNonce":     "<echoed>",
+       "recipientPublicHash": "<base64(SHA-256(outputSecret_string))>"
+     }
+   },
+   "payload": {
+     "secret":         "<buyer's input secret>",
+     "outputSecret":   "<derived output secret>",
+     "buyerPublicKey": "<base64 raw X25519 buyer pubkey, 32 bytes>"
+   }
+   ```
+
+4. **Facilitator enforces the hash binding.** When `accepted.extra.recipientPublicHash` is present, the facilitator MUST:
+   - Reject the request if `payload.outputSecret` is missing.
+   - Reject the request if `base64(SHA-256(outputSecret_string))` does not equal `recipientPublicHash`.
+   - Reject the request if the amount embedded in `outputSecret` does not equal `paymentRequirements.amount` (after unit conversion).
+   - Use `payload.outputSecret` as the output of `/replace`. The facilitator MUST NOT mint its own output.
+
+5. **Resource server verifies post-settlement.** After a successful settlement the resource server re-derives the expected output secret from `recipientPrivateKey + payload.buyerPublicKey + recipientNonce + amountDecimal` (using the same HKDF construction above) and compares against `settled.extensions.webcashOutput.secret`. A mismatch indicates the facilitator returned a secret that does not match the buyer's commitment — the resource server MUST respond HTTP 500 (not 402) and log a CRITICAL marker. The funds may have settled at the issuer but they are NOT controlled by this resource server.
+
+### Threat model and residual risk
+
+Binding constrains the facilitator to use a specific output secret. It does NOT prevent the facilitator from briefly knowing that secret — by construction the facilitator must put it in `/replace`'s `new_webcashes`. The facilitator could therefore race to spend the output between `/replace` returning and the resource server refreshing the secret into its own wallet.
+
+Mitigations:
+
+- The resource server's `onSettled` SHOULD immediately refresh the secret to a wallet-controlled secret via a second `/replace(input=output, output=fresh)` call. The shorter the time between settlement and refresh, the smaller the race window.
+- Deploy the facilitator with low network distance to your wallet's refresh path.
+- Use `paywallLocal` (in-process facilitator) whenever the race window is unacceptable.
+
+Detection: a successful race-spend by the facilitator manifests as the resource server's refresh `/replace` failing with the issuer's `already-replaced` error. The CRITICAL log from this failure is a clear signal the facilitator is dirty.
+
+### Reference implementation
+
+The reference TypeScript implementation exposes:
+
+- `RecipientKey.generate()`, `RecipientKey.fromJwk(...)`, `recipientKey.publicKeyBase64`, `RecipientKey.newNonce()`
+- `buildBoundOutput({ recipientPublicKey, recipientNonce, amountDecimal })` — buyer-side derivation
+- `paywall({ recipientKey })` and `paywallLocal(facilitator, { recipientKey })` — server-side; auto-publishes the binding challenge and verifies after settlement
+- The client-side `buildWebcashHeader` / `wrapFetchWithWebcash` auto-derive bound outputs whenever the 402 challenge advertises `recipientPublicKey` + `recipientNonce`
+
+See `src/recipient.ts`.
+
 ## Security Considerations
 
 ### Replay attack prevention
@@ -216,7 +303,11 @@ The webcash `/replace` endpoint is atomic at the issuer: either the input is ful
 
 ### TLS
 
-All communication between client, facilitator, and issuer MUST use TLS. Allowlisted issuer URLs MUST be HTTPS.
+All communication between client, facilitator, and issuer MUST use TLS. Allowlisted issuer URLs MUST be HTTPS (loopback HTTP is permitted only for in-process test rigs).
+
+Implementations SHOULD support SPKI (RFC 7469) certificate pinning on every HTTPS leg they make: facilitator → issuer, paywall middleware → facilitator, client splitter → issuer. Pinning is additive — the default CA chain validation still runs first; the pin is an extra check. Operators SHOULD configure at least two pins per endpoint (current + backup) so a planned key rotation is not an outage.
+
+The reference implementation exposes `pinnedSpkiHashes?: readonly string[]` on `FacilitatorOptions`, `PaywallOptions`, `SplitOptions`, and `AutoSplitOptions`, and a `createPinnedFetch({ pinnedSpkiHashes })` factory for callers using custom transports.
 
 ### Issuer trust
 
@@ -267,8 +358,6 @@ The canonical webcash issuer at `https://webcash.org` exposes (subject to change
 ### Open items
 
 - **Issuer-side discovery.** No standard exists yet for a webcash issuer to advertise its endpoints; this scheme assumes `payTo` is a base URL with the standard webcash.org API shape.
-- **`extra.recipientPublicHash`** is reserved here but no concrete mechanism exists yet to *enforce* it without protocol-level changes. The intent — bind the new output secret to a hash the resource server pre-published, so the facilitator cannot substitute its own — requires the facilitator to know the pre-image, which puts the facilitator and resource server in the same trust position. Practical mitigations until this is designed: (a) the resource server self-hosts the facilitator, eliminating the third-party trust gap, or (b) the resource server treats its facilitator as part of its trusted set, which the spec already requires.
-- **TLS certificate / SPKI pinning.** The current implementation enforces HTTPS scheme (https:// or loopback) but does not pin certificate fingerprints. A determined adversary with a CA-issued cert for the issuer hostname would still be able to MITM. Out of scope for v0.x; would require a custom dispatcher.
 - **Generalization to other bearer-secret rails.** A future `bearer-secret` scheme family could cover webcash, vouchers (e.g., harmoniis vouchers), and Lightning hold-invoices under one umbrella. Out of scope for this draft.
 
 ### Client-side persistence

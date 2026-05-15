@@ -1,6 +1,31 @@
 # Changelog
 
-All notable changes to `x402-webcash`. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semver but is still pre-1.0, so minor versions may include breaking changes until the spec is proposed upstream.
+All notable changes to `x402-webcash`. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). 1.0+ commits to API stability per semver — additive changes only on minor versions.
+
+## [1.0.0] — 2026-05-15
+
+**The webcash x402 scheme reference implementation, feature-complete.** 122 tests across the protocol surface; spec ready for upstream proposal to `coinbase/x402`.
+
+### Added
+
+- **`paywallLocal(facilitator, opts)`** — Express middleware that calls a `Facilitator` instance directly instead of HTTP-POSTing to a facilitator URL. Eliminates the third-party facilitator-trust boundary for self-hosted deployments. Same integrity gates and persistence contract as `paywall`. (`src/middleware.ts`, 9 new tests in `tests/paywall-local.test.ts`.)
+- **SPKI certificate pinning** — `pinnedSpkiHashes?: readonly string[]` accepted on `FacilitatorOptions`, `PaywallOptions`, `SplitOptions`, and `AutoSplitOptions`. RFC-7469 pin format (`base64(SHA-256(SPKI-DER))`). New exports: `createPinnedFetch`, `createPinnedDispatcher`, `checkPinnedIdentity`, `spkiSha256`, `PinMismatchError`. (`src/pinning.ts`, 16 tests including a live TLS handshake against a self-signed fixture in `tests/pinning.test.ts`.)
+- **Recipient binding (buyer-derived outputs)** — full protocol implementation. The 402 challenge can advertise `extra.recipientPublicKey` + `extra.recipientNonce`; the buyer derives the output secret via ECDH+HKDF; the facilitator enforces `sha256(outputSecret) == recipientPublicHash` and uses the buyer-supplied secret; the resource server verifies post-settlement against its private key. Closes the facilitator-substitution attack on remote facilitator deployments. New exports: `RecipientKey`, `buildBoundOutput`, `recipientPublicHash`, `BuyerBoundOutput`. New `payload.outputSecret` + `payload.buyerPublicKey` fields on `WebcashPayload` (additive, optional). (`src/recipient.ts`, 12 tests in `tests/recipient.test.ts` including an end-to-end substitution-detection test.)
+- **`SECURITY.md`** — describes the trust model, what is defended against (wire-leak, facilitator substitution, wrong-amount outputs, double-spend, lost-output-secret persistence), what is not (compromised issuer, race window with bound outputs against a malicious facilitator, process-memory extraction, wallet-at-rest encryption), and how to report vulnerabilities.
+
+### Changed
+
+- **Spec status: `Draft v0` → `v1`.** `specs/scheme_webcash.md` adds a "Recipient binding" section (full protocol + threat model + reference-implementation pointers), updates the TLS section with pinning guidance, and expands the field tables for `paymentRequirements.extra` and `payload`. Open-items list trimmed — the two reserved items (SPKI pinning, `recipientPublicHash` enforcement) are now closed.
+- **Middleware refactor.** `paywall` and `paywallLocal` share a `buildHandler` helper for everything after settlement (integrity gate, binding verification, persistence, recovery, 402/500 responses). Existing `paywall` behavior is byte-identical; the refactor is exercised by the unchanged middleware test suite.
+- **Facilitator `validate()`** now enforces that buyer-echoed `accepted.extra.recipientPublicKey` and `accepted.extra.recipientNonce` match `paymentRequirements.extra` when set. Defense-in-depth: the resource server's post-settlement check catches the same class of tampering, but failing here gives a cleaner error.
+
+### Dependencies
+
+- Added `undici@^6` as a runtime dependency (used by the SPKI pinning dispatcher). Node ≥20.
+
+### Compatibility
+
+- API is additive — no breaking changes from 0.5.x. Existing callers continue to work; new features are opt-in via new option fields.
 
 ## [0.5.4] — 2026-05-15
 
@@ -69,6 +94,7 @@ All notable changes to `x402-webcash`. Format follows [Keep a Changelog](https:/
 - **Round 3 review fixes** — settlement integrity gate, fetch timeouts, defensive issuer URL parsing.
 - **Initial release** — x402 v2 scheme spec (`specs/scheme_webcash.md`), `Facilitator` with `/verify` `/settle` `/supported`, Express `paywall` middleware.
 
+[1.0.0]: https://github.com/feldmannn/x402-webcash/compare/v0.5.4...v1.0.0
 [0.5.4]: https://github.com/feldmannn/x402-webcash/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/feldmannn/x402-webcash/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/feldmannn/x402-webcash/compare/v0.5.1...v0.5.2

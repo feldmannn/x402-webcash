@@ -13,9 +13,22 @@ export {
 export type { IssuerHealth, ParsedSecret, ReplaceResult } from "./webcash.js";
 export { Facilitator, isAcceptableIssuerScheme } from "./facilitator.js";
 export type { FacilitatorOptions } from "./facilitator.js";
-export { paywall } from "./middleware.js";
-export type { PaywallOptions, WebcashOutput } from "./middleware.js";
+export { paywall, paywallLocal } from "./middleware.js";
+export type { PaywallLocalOptions, PaywallOptions, WebcashOutput } from "./middleware.js";
 export { webcashSettler } from "./mcp-settler.js";
+export {
+  checkPinnedIdentity,
+  createPinnedDispatcher,
+  createPinnedFetch,
+  PinMismatchError,
+  spkiSha256,
+} from "./pinning.js";
+export {
+  buildBoundOutput,
+  recipientPublicHash,
+  RecipientKey,
+} from "./recipient.js";
+export type { BuyerBoundOutput } from "./recipient.js";
 // Client-side scheme handler (also exported via the `x402-webcash/client`
 // subpath for consumers that want to import only the client surface).
 export {

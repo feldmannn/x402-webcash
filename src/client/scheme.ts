@@ -6,6 +6,8 @@
 
 import { Buffer } from "node:buffer";
 import type { PaymentPayload, PaymentRequired, PaymentRequirements, WebcashPayload } from "../types.js";
+import { buildBoundOutput } from "../recipient.js";
+import { watsToDecimal } from "../webcash.js";
 import { splitToMatch, type SplitOptions } from "./split.js";
 import type { Wallet } from "./wallet.js";
 
@@ -51,6 +53,13 @@ export type AutoSplitOptions = {
   legalese?: Record<string, unknown>;
   timeoutMs?: number;
   mintOutputSecret?: (amountDecimal: string) => string;
+  /**
+   * SPKI pins for the issuer's TLS cert. When set, the auto-split's call to
+   * `${issuerUrl}/api/v1/replace` pins the server's public-key hash. A
+   * mismatch fails at TLS handshake before the input secret is transmitted.
+   * Mutually exclusive with `fetchImpl`.
+   */
+  pinnedSpkiHashes?: readonly string[];
 };
 
 /**
@@ -93,15 +102,46 @@ export async function buildWebcashHeader(
       legalese: opts.autoSplit.legalese,
       timeoutMs: opts.autoSplit.timeoutMs,
       mintOutputSecret: opts.autoSplit.mintOutputSecret,
+      pinnedSpkiHashes: opts.autoSplit.pinnedSpkiHashes,
     };
     secret = await splitToMatch(wallet, requirements.amount, split);
   }
   if (!secret) throw new NoMatchingSecretError(requirements.amount);
 
+  // Recipient binding: if the 402 challenge advertises a recipientPublicKey
+  // and nonce, derive a bound output secret. The facilitator will be forced
+  // to use it (instead of minting one of its own choosing) and the resource
+  // server will verify it post-settlement. See specs/scheme_webcash.md.
+  const recipientPublicKey = (requirements.extra as { recipientPublicKey?: unknown } | undefined)
+    ?.recipientPublicKey;
+  const recipientNonce = (requirements.extra as { recipientNonce?: unknown } | undefined)
+    ?.recipientNonce;
+  let webcashPayload: WebcashPayload = { secret };
+  let acceptedForEcho: PaymentRequirements = requirements;
+  if (typeof recipientPublicKey === "string" && typeof recipientNonce === "string") {
+    const bound = buildBoundOutput({
+      recipientPublicKey,
+      recipientNonce,
+      amountDecimal: watsToDecimal(BigInt(requirements.amount)),
+    });
+    webcashPayload = {
+      secret,
+      outputSecret: bound.outputSecret,
+      buyerPublicKey: bound.buyerPublicKey,
+    };
+    acceptedForEcho = {
+      ...requirements,
+      extra: {
+        ...(requirements.extra ?? {}),
+        recipientPublicHash: bound.recipientPublicHash,
+      },
+    };
+  }
+
   const payload: PaymentPayload<WebcashPayload> = {
     x402Version: 2,
-    accepted: requirements,
-    payload: { secret },
+    accepted: acceptedForEcho,
+    payload: webcashPayload,
   };
   const header = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
   return { header, requirements, secret };
